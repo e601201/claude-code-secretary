@@ -312,6 +312,18 @@ Claude Codeは複数のツールを同時に呼ぶことがある。単一フラ
 
 ## 6. Phase 2 ― Tauriの最小アプリ
 
+**2026-09-03 完了。** 実装は `src-tauri/src/lib.rs` と `src/`。実機で確認した完了条件: Dockに出ない、メニューバーに項目が出る、透明ウィンドウにキャラクターだけが見える、ドラッグで動く、クリック透過と常に前面の切り替えが効く、終了後の再起動で位置が復元される。
+
+実装時に分かったこと:
+
+- **位置は論理ピクセルで保存する。** 非表示のウィンドウは倍率が1.0と報告されるため、物理ピクセルで保存・復元するとRetinaで2倍の位置に飛ぶ。`tauri-plugin-window-state` も同じ理由でずれたので使わず、`window-state.json` に論理座標を自前で保存する。
+- **トレイはアイコンを必ず明示する。** アイコン無しだとmacOSでは幅ゼロの項目になり見えない。デバッグビルドでは「秘書」の文字も出して見つけやすくしている。
+- **初回起動はカーソルのあるディスプレイの右下に置く。** 複数ディスプレイ環境で、見ていない画面に出て気づけない事故を防ぐ。保存位置がどの画面にも無いときも同じ処理に落とす。
+- **キャラクター画像は `public/character/base.png`。** Viteの静的配信の都合で `assets/` ではなく `public/` に置く。無ければ `placeholder.svg` の仮キャラクターが出る。
+- **フロントエンドの診断は Rust の標準エラー出力へ流す。** `frontend_log` コマンドで画像の読み込み結果などを `tauri dev` のログに出せる。画面を直接見られない環境でも動作確認できる。
+
+以下は着手前の計画。
+
 Claude Codeとの接続はまだ行わない。目標は「デスクトップにキャラクターが表示され、ドラッグで動かせる」こと。
 
 ### 6.1 macOS向けのウィンドウ設定
@@ -415,7 +427,7 @@ Dockにアイコンが出ず、メニューバーにアイコンが出る
 3. 必要なら連番PNGでアニメーションを追加する。形式は「状態ごとのディレクトリに連番PNG」に統一する
 
 ```text
-assets/character/
+public/character/
 ├── base.png          # 1枚絵
 ├── happy.png         # 表情差分（後で追加）
 ├── troubled.png
@@ -744,8 +756,8 @@ tauri-app/
 │   ├── secretary-core/       # 状態機械（Phase 1 で実装済み）
 │   ├── hook-logger/          # Phase 0 のログサーバー
 │   └── secretary-hook/       # hookクライアント CLI（Phase 5 から）
-├── assets/
-│   └── character/
+├── public/
+│   └── character/            # base.png を置く。無ければ placeholder.svg
 ├── hooks/
 │   └── secretary-hook.sh     # Phase 0 用。インストール手順を README に書く
 ├── scripts/
@@ -767,7 +779,7 @@ tauri-app/
 |---|---|---|
 | 0 | イベント源の検証スパイク | 6状態を導出できるシグナルの確定（完了） |
 | 1 | 状態と遷移の設計 | 対応表と遷移規則の確定（完了。`docs/state-machine.md` と `crates/secretary-core`） |
-| 2 | Tauri最小アプリ | 透明なデスクトップキャラ（macOS） |
+| 2 | Tauri最小アプリ | 透明なデスクトップキャラ（macOS）（完了） |
 | 3 | キャラクター表示と動き | 1枚絵が状態ごとに動く |
 | 4 | Secretary Core の配線と fake event | HTTP サーバーと Tauri への接続。偽イベントで一連の遷移が動く |
 | 5 | Claude Code接続 | 実際の作業に秘書が反応する |

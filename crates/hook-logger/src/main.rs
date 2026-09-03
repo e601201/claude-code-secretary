@@ -65,7 +65,10 @@ async fn receive_hook(State(state): State<Arc<AppState>>, body: Bytes) -> Status
         Err(_) => json!({ "raw": String::from_utf8_lossy(&body) }),
     };
 
-    println!("{}", summarize(&now.format("%H:%M:%S%.3f").to_string(), &hook));
+    println!(
+        "{}",
+        summarize(&now.format("%H:%M:%S%.3f").to_string(), &hook)
+    );
 
     let mut line = json!({ "received_at": now.to_rfc3339(), "hook": hook }).to_string();
     line.push('\n');

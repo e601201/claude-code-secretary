@@ -10,12 +10,25 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
     "windows": [
       {
-        "title": "tauri-app",
-        "width": 800,
-        "height": 600
+        "label": "character",
+        "title": "Secretary",
+        "width": 240,
+        "height": 320,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "visible": false
       }
     ],
     "security": {
