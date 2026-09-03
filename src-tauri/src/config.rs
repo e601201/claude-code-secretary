@@ -29,7 +29,7 @@ pub struct AppConfig {
     pub stale_after_secs: u64,
     #[ts(type = "number")]
     pub max_message_chars: usize,
-    /// キャラクターの大きさ(1.0 = 280x420)。0.5〜2.0
+    /// キャラクターの大きさ(1.0 = 280x444)。0.5〜2.0
     pub scale: f64,
     /// 許可待ちになったら OS の通知を出す
     pub notify_on_waiting: bool,
@@ -144,7 +144,7 @@ impl AppConfig {
              # 吹き出し文言の最大文字数\n\
              max_message_chars = {chars}\n\
              \n\
-             # キャラクターの大きさ(1.0 = 280x420)。0.5〜2.0\n\
+             # キャラクターの大きさ(1.0 = 280x444)。0.5〜2.0\n\
              scale = {scale:?}\n\
              \n\
              # 許可待ちになったら OS の通知を出す\n\

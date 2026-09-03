@@ -565,7 +565,7 @@ Stop → success（跳ねる）→ idle
 
 ## 10. Phase 6 ― 吹き出し
 
-**2026-09-03 完了。** 実装は `src/bubble/bubble.ts` と `src/styles.css`。文言と種別（reply / assistant / permission / system）はRust側のスナップショットに乗っているので、フロントは種別ごとの見た目と表示時間を決めるだけ。表示時間は文字数に応じて4〜12秒、system は6秒、permission は状態が変わるまで出しっぱなし。同じ文言のスナップショットが続いても再表示しない。吹き出しの余白のためウィンドウを280×420に広げ、キャラクターは下部240×320に固定した。
+**2026-09-03 完了。** 実装は `src/bubble/bubble.ts` と `src/styles.css`。文言と種別（reply / assistant / permission / system）はRust側のスナップショットに乗っているので、フロントは種別ごとの見た目と表示時間を決めるだけ。表示時間は文字数に応じて4〜12秒、system は6秒、permission は状態が変わるまで出しっぱなし。同じ文言のスナップショットが続いても再表示しない。吹き出しの余白のためウィンドウを280×444に広げ、キャラクターは下部240×320に固定した。
 
 課題: ウィンドウが広がったぶん、透明な余白もクリックを受け止めて背後のアプリを触れなくなる。Phase 8でカーソル位置に応じてクリック透過を自動で切り替える対応を検討する。
 
@@ -735,7 +735,7 @@ SpeechBubble
 **2026-09-03 完了（Windows対応は行わない判断のまま）。**
 
 - **設定画面**: トレイと右クリックの「設定…」で `settings` ウィンドウを開く（`settings.html`、`src/settings/`、`src-tauri/src/settings.rs`）。閉じても隠すだけで、次回はすぐ出る。項目は表示の大きさ（0.5〜2.0倍）、追跡するセッション（Discord/秘書だけ・すべて・session_id固定）、作業ディレクトリの前方一致、許可待ちの通知、ログイン時の起動、ポート、保持秒数、失効秒数、吹き出しの文字数、設定ファイルと口調の辞書を開くボタン、辞書の読み直し。保存は `config.toml` を書き直してから `Core::apply_config` で反映する。ポート以外はその場で効き、ポートは再起動が要る。値は `AppConfig::normalized` で安全な範囲に収める。
-- **表示の大きさ**: `config.toml` の `scale`。ウィンドウを基準サイズ（280×420）の倍数にし、webview 側は幅から倍率を読んで `#stage` に `zoom` を掛ける。カーソル判定（`cursor_over_figure`）も同じ倍率で見る。
+- **表示の大きさ**: `config.toml` の `scale`。ウィンドウを基準サイズ（280×444）の倍数にし、webview 側は幅から倍率を読んで `#stage` に `zoom` を掛ける。カーソル判定（`cursor_over_figure`）も同じ倍率で見る。
 - **通知**: `notify_on_waiting`（既定 true）。スナップショットが許可待ちに「入った」瞬間だけ、吹き出しの文言を本文にして通知する（`src-tauri/src/notify.rs`）。ビルド版は `tauri-plugin-notification`、開発版（`tauri dev`）は実行ファイルが .app に無く通知センターに登録できないので `osascript` で出す（送り主は Script Editor になる）。
 - **自動起動**: `tauri-plugin-autostart`（LaunchAgent）。トレイの「ログイン時に起動」と設定画面のチェックで切り替える。開発版の実行ファイルは vite の dev サーバーが無いと動かないので、開発版では項目を無効にしてビルド版でだけ有効にした。ビルド版は `bun run tauri build` → `target/release/bundle/macos/tauri-app.app`。
 - **やらなかったこと**: Windows対応。アニメーションと素材のブラッシュアップはユーザーの一枚絵（`public/character/base.png`）が入ってから調整する。

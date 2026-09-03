@@ -18,7 +18,7 @@ cwd_prefixes: Array<string>, success_hold_secs: number, error_hold_secs: number,
  */
 stale_after_secs: number, max_message_chars: number, 
 /**
- * キャラクターの大きさ(1.0 = 280x420)。0.5〜2.0
+ * キャラクターの大きさ(1.0 = 280x444)。0.5〜2.0
  */
 scale: number, 
 /**

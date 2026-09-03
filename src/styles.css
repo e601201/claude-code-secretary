@@ -14,9 +14,9 @@ body {
 /* ステージ。ウィンドウ全体がドラッグ領域。上部は吹き出しの余白 */
 #stage {
   position: relative;
-  /* 基準サイズ。ウィンドウが scale 倍のときは main.ts が zoom で合わせる */
+  /* 基準サイズ(tauri.conf.json / lib.rs の BASE_* と合わせる)。ウィンドウが scale 倍のときは main.ts が zoom で合わせる */
   width: 280px;
-  height: 420px;
+  height: 444px;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -57,7 +57,8 @@ body {
 #bubble {
   position: absolute;
   left: 50%;
-  bottom: 292px;
+  /* キャラクター枠(320px)の少し上。しっぽが頭に触れない高さ */
+  bottom: 316px;
   width: max-content;
   max-width: 250px;
   padding: 8px 12px;
