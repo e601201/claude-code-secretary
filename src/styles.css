@@ -11,7 +11,7 @@ body {
   cursor: default;
 }
 
-/* キャラクターの立ち位置。ウィンドウ全体がドラッグ領域 */
+/* ステージ。ウィンドウ全体がドラッグ領域。上部は吹き出しの余白 */
 #stage {
   position: relative;
   width: 100vw;
@@ -19,20 +19,112 @@ body {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Helvetica Neue", Arial, sans-serif;
+}
+
+/* キャラクターの立ち位置(ウィンドウ下部に固定) */
+#figure {
+  position: relative;
+  width: 240px;
+  height: 320px;
+  flex: none;
 }
 
 /* クリックは親の #stage に届かせる(ドラッグ判定は e.target を見るため) */
+#figure,
 #character,
-#badge {
+#badge,
+#bubble {
   pointer-events: none;
   -webkit-user-drag: none;
 }
 
 #character {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: bottom;
   transform-origin: 50% 100%;
   animation: breathe 3.2s ease-in-out infinite;
+}
+
+/* ===== 吹き出し ===== */
+
+#bubble {
+  position: absolute;
+  left: 50%;
+  bottom: 292px;
+  width: max-content;
+  max-width: 250px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: #ffffff;
+  color: #222;
+  font-size: 13px;
+  line-height: 1.45;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(0, 0, 0, 0.06);
+  opacity: 0;
+  transform: translate(-50%, 6px) scale(0.92);
+  transform-origin: 50% 100%;
+  transition:
+    opacity 0.18s ease-out,
+    transform 0.18s ease-out;
+}
+
+#bubble.visible {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+
+/* しっぽ(頭の方を指す) */
+#bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -7px;
+  width: 12px;
+  height: 12px;
+  background: inherit;
+  transform: translateX(-50%) rotate(45deg);
+  border-radius: 2px;
+  box-shadow: 2px 2px 3px rgba(0, 0, 0, 0.08);
+}
+
+#bubble-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
+#bubble[data-kind="assistant"] {
+  color: #2a3140;
+}
+
+#bubble[data-kind="permission"] {
+  background: #fff6dc;
+  color: #5c4300;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.18),
+    0 0 0 1.5px #f0b429;
+}
+
+#bubble[data-kind="permission"].visible {
+  animation: attention 1.6s ease-in-out infinite;
+}
+
+#bubble[data-kind="system"] {
+  background: #fdeaea;
+  color: #7a1f1f;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.18),
+    0 0 0 1.5px #e57373;
 }
 
 /* 頭上の状態バッジ */
@@ -195,6 +287,17 @@ body {
   }
 }
 
+/* 許可待ち: 気づいてほしいので軽く揺れる */
+@keyframes attention {
+  0%,
+  100% {
+    transform: translate(-50%, 0) scale(1);
+  }
+  50% {
+    transform: translate(-50%, -3px) scale(1.02);
+  }
+}
+
 @keyframes pop {
   0% {
     transform: scale(0.4);
@@ -211,7 +314,9 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   #character,
-  #badge {
+  #badge,
+  #bubble {
     animation: none !important;
+    transition: none !important;
   }
 }

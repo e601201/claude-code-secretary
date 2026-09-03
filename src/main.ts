@@ -4,6 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { SpeechBubble } from "./bubble/bubble";
 import { Character } from "./character/character";
 import type { SecretarySnapshot } from "./generated/SecretarySnapshot";
 
@@ -19,13 +20,17 @@ async function main(): Promise<void> {
   const stage = document.getElementById("stage");
   const img = document.getElementById("character") as HTMLImageElement | null;
   const badge = document.getElementById("badge");
-  if (!stage || !img || !badge) return;
+  const bubbleEl = document.getElementById("bubble");
+  const bubbleText = document.getElementById("bubble-text");
+  if (!stage || !img || !badge || !bubbleEl || !bubbleText) return;
 
   const character = new Character(stage, img, badge, log);
+  const bubble = new SpeechBubble(bubbleEl, bubbleText, log);
   await character.mount();
 
   const apply = (snapshot: SecretarySnapshot): void => {
     character.setState(snapshot.status);
+    bubble.update(snapshot);
     log(`state=${snapshot.status} message=${JSON.stringify(snapshot.message)} tool=${JSON.stringify(snapshot.current_tool)}`);
   };
 
