@@ -3,14 +3,18 @@
 //! Phase 2 の範囲: 透明で装飾のない常時前面ウィンドウにキャラクターを表示し、
 //! Dock には出さずメニューバーのトレイから操作する。ウィンドウ位置は再起動後も保つ。
 
-use std::{fs, path::PathBuf};
+mod bridge;
+
+use std::{fs, path::PathBuf, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
     AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, RunEvent, Runtime, WebviewWindow,
 };
+
+use bridge::SnapshotBridge;
 
 /// `tauri.conf.json` の windows[].label と一致させる。
 pub const CHARACTER_WINDOW: &str = "character";
@@ -19,6 +23,9 @@ const TRAY_ID: &str = "main";
 const MENU_CLICK_THROUGH: &str = "click_through";
 const MENU_ALWAYS_ON_TOP: &str = "always_on_top";
 const MENU_QUIT: &str = "quit";
+const MENU_DEMO_PLAY: &str = "demo_play";
+/// デバッグメニューの状態項目は `demo_state_<name>`。
+const MENU_DEMO_STATE_PREFIX: &str = "demo_state_";
 
 /// ウィンドウ位置の保存ファイル名(app_config_dir 直下)。
 const STATE_FILENAME: &str = "window-state.json";
@@ -213,6 +220,33 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &quit,
         ],
     )?;
+    if cfg!(debug_assertions) {
+        // 開発中だけ: 状態を手で切り替えて見た目を確認する
+        let mut items: Vec<MenuItem<R>> = Vec::new();
+        items.push(MenuItem::with_id(
+            app,
+            MENU_DEMO_PLAY,
+            "デモを一巡再生",
+            true,
+            None::<&str>,
+        )?);
+        for state in bridge::ALL_STATES {
+            let name = bridge::state_name(state);
+            items.push(MenuItem::with_id(
+                app,
+                format!("{MENU_DEMO_STATE_PREFIX}{name}"),
+                format!("状態: {name}"),
+                true,
+                None::<&str>,
+            )?);
+        }
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = items
+            .iter()
+            .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
+            .collect();
+        let debug = Submenu::with_items(app, "デバッグ", true, &refs)?;
+        menu.insert(&debug, 2)?;
+    }
 
     // アイコン無しで作ると macOS では幅ゼロの項目になって見えないので、必ず埋め込み画像を使う。
     let mut tray = TrayIconBuilder::with_id(TRAY_ID)
@@ -250,7 +284,15 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 }
                 app.exit(0);
             }
-            _ => {}
+            MENU_DEMO_PLAY => bridge::play_demo_once(app.clone(), Duration::from_secs(3)),
+            id => {
+                if let Some(state) = id
+                    .strip_prefix(MENU_DEMO_STATE_PREFIX)
+                    .and_then(bridge::state_from_name)
+                {
+                    bridge::publish(app, bridge::demo_snapshot(state));
+                }
+            }
         })
         .build(app)?;
     app.manage(TrayHandle(tray));
@@ -267,6 +309,7 @@ fn frontend_log(message: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .manage(SnapshotBridge::new())
         .setup(|app| {
             // Dock にアイコンを出さない(macOS)。skipTaskbar は Windows / Linux 専用。
             #[cfg(target_os = "macos")]
@@ -274,9 +317,10 @@ pub fn run() {
 
             build_tray(app.handle())?;
             restore_and_show(app.handle())?;
+            bridge::start_demo_loop_if_requested(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![frontend_log])
+        .invoke_handler(tauri::generate_handler![frontend_log, bridge::get_snapshot])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

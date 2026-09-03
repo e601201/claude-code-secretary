@@ -3246,6 +3246,7 @@ dependencies = [
 name = "tauri-app"
 version = "0.1.0"
 dependencies = [
+ "secretary-core",
  "serde",
  "serde_json",
  "tauri",

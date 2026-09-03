@@ -405,6 +405,8 @@ Dockにアイコンが出ず、メニューバーにアイコンが出る
 
 ## 7. Phase 3 ― キャラクター表示と動き
 
+**2026-09-03 完了。** 実装は `src/character/character.ts` と `src/styles.css`、Rust側は `src-tauri/src/bridge.rs`。Rust が `secretary://snapshot` イベントで `SecretarySnapshot` を流し、フロントは `data-state` 属性とバッジを切り替えるだけ。動きはすべてCSSアニメーション。状態ごとの差分画像は `public/character/<state>.png` があれば自動で使う。デバッグ用にトレイの「デバッグ」サブメニューと `SECRETARY_DEMO=1` の巡回デモを用意した。
+
 ### 7.1 方針
 
 現在の素材は1枚絵。多フレームのスプライトを最初から作るのは工数が最大の非エンジニアリング作業になるため、MVPでは**1枚絵 + 手続き的な動き + 状態バッジ**で「生きている」感じを作る。
@@ -780,7 +782,7 @@ tauri-app/
 | 0 | イベント源の検証スパイク | 6状態を導出できるシグナルの確定（完了） |
 | 1 | 状態と遷移の設計 | 対応表と遷移規則の確定（完了。`docs/state-machine.md` と `crates/secretary-core`） |
 | 2 | Tauri最小アプリ | 透明なデスクトップキャラ（macOS）（完了） |
-| 3 | キャラクター表示と動き | 1枚絵が状態ごとに動く |
+| 3 | キャラクター表示と動き | 1枚絵が状態ごとに動く（完了） |
 | 4 | Secretary Core の配線と fake event | HTTP サーバーと Tauri への接続。偽イベントで一連の遷移が動く |
 | 5 | Claude Code接続 | 実際の作業に秘書が反応する |
 | 6 | 吹き出し | Claudeの発言が秘書の言葉になる |

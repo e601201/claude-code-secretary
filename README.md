@@ -22,9 +22,17 @@ Dock にはアイコンが出ず、メニューバーにアイコンが出る。
 
 メニューバーのアイコンから「クリック透過」「常に前面に表示」の切り替えと「終了」ができる。
 
+開発ビルドではメニューに「デバッグ」が加わり、6 状態(idle / thinking / working / waiting / success / error)を手で切り替えたり、一巡のデモを再生したりできる。起動時に環境変数 `SECRETARY_DEMO=1` を付けると 3 秒ごとに状態を巡回し続ける。
+
+```sh
+SECRETARY_DEMO=1 bun run tauri dev
+```
+
 ## キャラクター画像
 
 `public/character/base.png` に透過 PNG を置くと、その画像が表示される。推奨サイズは 240×320 程度(ウィンドウと同じ比率)。無い場合は `public/character/placeholder.svg` の仮キャラクターが出る。
+
+状態ごとの差分画像は任意。`public/character/<state>.png`(例: `success.png`、`error.png`)を置くと、その状態のときだけ差し替わる。動き(呼吸、首かしげ、跳躍、震え)とバッジは 1 枚絵のままでも付く。
 
 ## テスト
 

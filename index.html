@@ -8,8 +8,9 @@
     <script type="module" src="/src/main.ts" defer></script>
   </head>
   <body>
-    <!-- data-tauri-drag-region: この要素を掴むとウィンドウごと動く -->
+    <!-- data-tauri-drag-region: この要素を掴むとウィンドウごと動く。data-state で見た目が変わる -->
     <div id="stage" data-tauri-drag-region data-state="idle">
+      <div id="badge" aria-hidden="true"></div>
       <img id="character" alt="" draggable="false" />
     </div>
   </body>
