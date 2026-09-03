@@ -21,19 +21,21 @@ use axum::{
 use secretary_core::{FollowPolicy, HookEnvelope, HookEvent, SecretarySnapshot, Tracker};
 use tauri::{AppHandle, Runtime};
 
-use crate::bridge;
+use crate::{bridge, persona::Persona};
 
-/// Tracker と、最後に配信したスナップショット。
+/// Tracker と人格、最後に配信したスナップショット。
 pub struct Core {
     tracker: Mutex<Tracker>,
+    persona: Mutex<Persona>,
     token: String,
     last_published: Mutex<Option<SecretarySnapshot>>,
 }
 
 impl Core {
-    pub fn new(tracker: Tracker, token: String) -> Self {
+    pub fn new(tracker: Tracker, persona: Persona, token: String) -> Self {
         Self {
             tracker: Mutex::new(tracker),
+            persona: Mutex::new(persona),
             token,
             last_published: Mutex::new(None),
         }
@@ -47,13 +49,20 @@ impl Core {
     pub fn ingest(&self, body: &str) -> Result<HookEvent, String> {
         let envelope = HookEnvelope::parse(body).map_err(|e| e.to_string())?;
         eprintln!("[hook] {}", summarize(&envelope));
-        let mut tracker = self.tracker.lock().unwrap();
-        Ok(tracker.apply(&envelope, Instant::now()))
+        let now = Instant::now();
+        let event = self.tracker.lock().unwrap().apply(&envelope, now);
+        self.persona
+            .lock()
+            .unwrap()
+            .on_event(&envelope.session_id, &event, now);
+        Ok(event)
     }
 
-    /// 現在のスナップショットが前回配信と異なれば返す(そして記録する)。
+    /// 現在のスナップショット(人格で飾ったもの)が前回配信と異なれば返す(そして記録する)。
     pub fn changed_snapshot(&self) -> Option<SecretarySnapshot> {
-        let snapshot = self.tracker.lock().unwrap().snapshot(Instant::now());
+        let now = Instant::now();
+        let mut snapshot = self.tracker.lock().unwrap().snapshot(now);
+        self.persona.lock().unwrap().decorate(&mut snapshot, now);
         let mut last = self.last_published.lock().unwrap();
         if last.as_ref() == Some(&snapshot) {
             return None;
@@ -222,8 +231,36 @@ mod tests {
                 follow: FollowPolicy::All,
                 ..Default::default()
             }),
+            Persona::new(crate::persona::PersonaConfig::default()),
             "secret".into(),
         )
+    }
+
+    #[test]
+    fn persona_fills_empty_message_and_claude_reply_wins() {
+        let core = core();
+        core.ingest(
+            r#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","cwd":"/x","prompt":"hi"}"#,
+        )
+        .unwrap();
+        let snap = core.changed_snapshot().unwrap();
+        assert_eq!(snap.status, AssistantState::Thinking);
+        assert!(
+            snap.message.is_some(),
+            "persona should add a turn-start phrase"
+        );
+        assert_eq!(
+            snap.message_kind,
+            Some(secretary_core::SpeechKind::Assistant)
+        );
+
+        core.ingest(
+            r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":"/x","tool_name":"mcp__plugin_discord_discord__reply","tool_use_id":"t","tool_input":{"chat_id":"1","text":"やります"}}"#,
+        )
+        .unwrap();
+        let snap = core.changed_snapshot().unwrap();
+        assert_eq!(snap.message.as_deref(), Some("やります"));
+        assert_eq!(snap.message_kind, Some(secretary_core::SpeechKind::Reply));
     }
 
     #[test]

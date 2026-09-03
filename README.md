@@ -30,6 +30,10 @@ Dock にはアイコンが出ず、メニューバーにアイコンが出る。
 SECRETARY_DEMO=1 bun run tauri dev
 ```
 
+## 秘書の口調
+
+`persona.toml` を編集すると吹き出しの定型文を差し替えられる。指示を受けたとき(`turn_start`)、作業が長引いたとき(`long_work`)、成功(`success`)、失敗の前置き(`error`)、許可待ちの言い換え(`waiting`、`{tool}` がツール名になる)の 5 種類で、各項目は候補の配列。Claude が Discord に返した本文や最終応答があるときはそちらが優先され、定型文は文言が無いときだけ使われる。
+
 ## キャラクター画像
 
 `public/character/base.png` に透過 PNG を置くと、その画像が表示される。推奨サイズは 240×320 程度(ウィンドウと同じ比率)。無い場合は `public/character/placeholder.svg` の仮キャラクターが出る。
@@ -50,7 +54,7 @@ bun test                        # フロントエンド(吹き出しの表示時
 bun run tauri dev              # アプリが 127.0.0.1:47831 で hook を受け付ける
 ```
 
-アプリは起動時に `~/Library/Application Support/com.nagatadaichi.tauriapp/` へ `config.toml`(設定)と `token`(hook の認証トークン)を書く。hook スクリプトは同じトークンを読んで `Authorization: Bearer` で送る。設定を変えたらアプリを再起動する。
+アプリは起動時に `~/Library/Application Support/com.nagatadaichi.tauriapp/` へ `config.toml`(設定)、`persona.toml`(秘書の口調の辞書)、`token`(hook の認証トークン)を書く。hook スクリプトは同じトークンを読んで `Authorization: Bearer` で送る。設定を変えたらアプリを再起動する。
 
 既定では Discord 由来のセッションだけを表示する。ターミナルで動かしている Claude Code にも反応させたいときは、メニューバーの「すべてのセッションを追跡」をオンにするか、`config.toml` の `follow` を `"all"` にする。
 

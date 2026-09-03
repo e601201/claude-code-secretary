@@ -5,6 +5,7 @@
 
 mod bridge;
 mod config;
+mod persona;
 mod server;
 
 use std::{
@@ -533,7 +534,12 @@ pub fn run() {
             // 設定と認証トークンを読み、Tracker を包む Core を用意する
             let config = config::load_or_create(app.handle());
             let token = config::load_or_create_token(app.handle())?;
-            let core = Arc::new(Core::new(Tracker::new(config.tracker_config()), token));
+            let persona = persona::Persona::new(persona::load_or_create(app.handle()));
+            let core = Arc::new(Core::new(
+                Tracker::new(config.tracker_config()),
+                persona,
+                token,
+            ));
             app.manage(core.clone());
             let ui = Arc::new(Interaction::default());
             app.manage(ui.clone());
