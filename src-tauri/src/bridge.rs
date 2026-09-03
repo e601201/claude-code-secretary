@@ -45,6 +45,7 @@ pub fn publish<R: Runtime>(app: &AppHandle<R>, snapshot: SecretarySnapshot) {
     if let Some(bridge) = app.try_state::<SnapshotBridge>() {
         *bridge.last.lock().unwrap() = snapshot.clone();
     }
+    crate::update_tray_status(app, &snapshot);
     if let Err(e) = app.emit_to(CHARACTER_WINDOW, SNAPSHOT_EVENT, &snapshot) {
         eprintln!("emit snapshot failed: {e}");
     }

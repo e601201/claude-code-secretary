@@ -31,6 +31,9 @@ export function toolLine(snapshot: SecretarySnapshot): string {
 
 export class StatusPanel {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** 右クリックメニューの「今のタスクを表示」。true の間は状態に関わらず出しっぱなし */
+  private pinned = false;
+  private last: SecretarySnapshot | null = null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -44,8 +47,26 @@ export class StatusPanel {
     private readonly log: (message: string) => void = () => {},
   ) {}
 
+  setPinned(pinned: boolean): void {
+    this.pinned = pinned;
+    this.log(`panel pinned=${pinned}`);
+    if (pinned) {
+      this.clearTimer();
+      this.setVisible(true);
+    } else if (this.last) {
+      this.update(this.last);
+    } else {
+      this.setVisible(false);
+    }
+  }
+
   update(snapshot: SecretarySnapshot): void {
+    this.last = snapshot;
     this.render(snapshot);
+    if (this.pinned) {
+      this.setVisible(true);
+      return;
+    }
     switch (panelMode(snapshot)) {
       case "show":
         this.clearTimer();

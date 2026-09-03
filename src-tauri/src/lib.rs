@@ -7,17 +7,26 @@ mod bridge;
 mod config;
 mod server;
 
-use std::{fs, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, ContextMenu, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, RunEvent, Runtime, WebviewWindow,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, RunEvent, Runtime,
+    WebviewWindow,
 };
 
 use bridge::SnapshotBridge;
-use secretary_core::{FollowPolicy, Tracker};
+use secretary_core::{AssistantState, FollowPolicy, SecretarySnapshot, Tracker};
 use server::Core;
 
 /// `tauri.conf.json` の windows[].label と一致させる。
@@ -28,6 +37,11 @@ const MENU_CLICK_THROUGH: &str = "click_through";
 const MENU_ALWAYS_ON_TOP: &str = "always_on_top";
 const MENU_QUIT: &str = "quit";
 const MENU_FOLLOW_ALL: &str = "follow_all";
+const MENU_STATUS: &str = "status";
+const MENU_PIN_PANEL: &str = "pin_panel";
+const MENU_OPEN_CONFIG: &str = "open_config";
+/// webview が購読する、パネル固定の切り替えイベント。
+pub const PANEL_PIN_EVENT: &str = "secretary://panel-pin";
 const MENU_DEMO_PLAY: &str = "demo_play";
 /// デバッグメニューの状態項目は `demo_state_<name>`。
 const MENU_DEMO_STATE_PREFIX: &str = "demo_state_";
@@ -36,9 +50,158 @@ const MENU_DEMO_STATE_PREFIX: &str = "demo_state_";
 const STATE_FILENAME: &str = "window-state.json";
 /// 初回配置のときの画面端からの余白(論理ピクセル)。
 const EDGE_MARGIN: f64 = 24.0;
+/// キャラクター(#figure)の大きさ。index.html / styles.css と合わせる。
+const FIGURE_WIDTH: f64 = 240.0;
+const FIGURE_HEIGHT: f64 = 320.0;
+/// キャラクターの矩形の周囲で、まだ「触れている」とみなす余白(論理ピクセル)。
+const HOVER_MARGIN: f64 = 16.0;
 
 /// トレイは最後のハンドルが破棄されると消える参照カウント方式なので、アプリ状態で保持する。
-struct TrayHandle<R: Runtime>(#[allow(dead_code)] TrayIcon<R>);
+/// `status` は追跡中セッションと状態を表示する無効化された項目。
+struct TrayHandle<R: Runtime> {
+    #[allow(dead_code)]
+    tray: TrayIcon<R>,
+    status: MenuItem<R>,
+}
+
+/// ユーザー操作に関わる切り替え状態。
+#[derive(Default)]
+pub struct Interaction {
+    /// トレイの「クリック透過(常時)」。true なら常にすり抜ける
+    manual_click_through: AtomicBool,
+    /// 右クリックメニューの「今のタスクを表示」。true ならパネルを出しっぱなしにする
+    panel_pinned: AtomicBool,
+}
+
+fn status_label(state: AssistantState) -> &'static str {
+    match state {
+        AssistantState::Idle => "待機中",
+        AssistantState::Thinking => "考え中",
+        AssistantState::Working => "作業中",
+        AssistantState::Waiting => "許可待ち",
+        AssistantState::Success => "完了",
+        AssistantState::Error => "エラー",
+    }
+}
+
+/// トレイの状態行を更新する。bridge::publish から呼ばれる。
+pub fn update_tray_status<R: Runtime>(app: &AppHandle<R>, snapshot: &SecretarySnapshot) {
+    let Some(handle) = app.try_state::<TrayHandle<R>>() else {
+        return;
+    };
+    let text = match &snapshot.session_label {
+        Some(label) => format!("{} · {}", label, status_label(snapshot.status)),
+        None => "追跡中のセッションなし".to_string(),
+    };
+    if let Err(e) = handle.status.set_text(text) {
+        eprintln!("tray status update failed: {e}");
+    }
+}
+
+/// カーソル(論理座標)がキャラクターの矩形(余白込み)に入っているか。
+fn cursor_over_figure(
+    cursor: LogicalPosition<f64>,
+    window_pos: LogicalPosition<f64>,
+    window_size: LogicalSize<f64>,
+) -> bool {
+    let fx = window_pos.x + (window_size.width - FIGURE_WIDTH) / 2.0;
+    let fy = window_pos.y + window_size.height - FIGURE_HEIGHT;
+    cursor.x >= fx - HOVER_MARGIN
+        && cursor.x < fx + FIGURE_WIDTH + HOVER_MARGIN
+        && cursor.y >= fy - HOVER_MARGIN
+        && cursor.y < fy + FIGURE_HEIGHT + HOVER_MARGIN
+}
+
+/// カーソルがキャラクターの外にある間だけクリックをすり抜けさせる。
+/// すり抜け中はウィンドウにマウスイベントが届かないので、Rust 側で定期的に位置を見る。
+async fn cursor_watch(app: AppHandle, ui: Arc<Interaction>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(60));
+    let mut last: Option<bool> = None;
+    loop {
+        interval.tick().await;
+        let Some(window) = character_window(&app) else {
+            continue;
+        };
+        let desired = if ui.manual_click_through.load(Ordering::Relaxed) {
+            true
+        } else {
+            let over = (|| -> tauri::Result<bool> {
+                let primary_scale = window
+                    .primary_monitor()?
+                    .map(|m| m.scale_factor())
+                    .unwrap_or(1.0);
+                let cursor = window.cursor_position()?.to_logical::<f64>(primary_scale);
+                Ok(cursor_over_figure(
+                    cursor,
+                    window_logical_position(&window)?,
+                    window_logical_size(&window)?,
+                ))
+            })()
+            .unwrap_or(true);
+            !over
+        };
+        if last != Some(desired) {
+            match window.set_ignore_cursor_events(desired) {
+                Ok(()) => {
+                    eprintln!("[hover] ignore_cursor_events={desired}");
+                    last = Some(desired);
+                }
+                Err(e) => eprintln!("set_ignore_cursor_events failed: {e}"),
+            }
+        }
+    }
+}
+
+fn open_config_file<R: Runtime>(app: &AppHandle<R>) {
+    let Ok(dir) = config::config_dir(app) else {
+        return;
+    };
+    let path = dir.join(config::CONFIG_FILENAME);
+    if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
+        eprintln!("open {} failed: {e}", path.display());
+    }
+}
+
+fn set_panel_pinned<R: Runtime>(app: &AppHandle<R>, ui: &Interaction, pinned: bool) {
+    ui.panel_pinned.store(pinned, Ordering::Relaxed);
+    if let Err(e) = app.emit_to(CHARACTER_WINDOW, PANEL_PIN_EVENT, pinned) {
+        eprintln!("emit panel pin failed: {e}");
+    }
+}
+
+/// キャラクター上の右クリックで出すメニュー。webview から呼ばれる。
+#[tauri::command]
+fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String> {
+    let pinned = app
+        .try_state::<Arc<Interaction>>()
+        .map(|ui| ui.panel_pinned.load(Ordering::Relaxed))
+        .unwrap_or(false);
+    let build = || -> tauri::Result<Menu<tauri::Wry>> {
+        Menu::with_items(
+            &app,
+            &[
+                &CheckMenuItem::with_id(
+                    &app,
+                    MENU_PIN_PANEL,
+                    "今のタスクを表示",
+                    true,
+                    pinned,
+                    None::<&str>,
+                )?,
+                &PredefinedMenuItem::separator(&app)?,
+                &MenuItem::with_id(
+                    &app,
+                    MENU_OPEN_CONFIG,
+                    "設定ファイルを開く",
+                    true,
+                    None::<&str>,
+                )?,
+            ],
+        )
+    };
+    let menu = build().map_err(|e| e.to_string())?;
+    menu.popup(window).map_err(|e| e.to_string())
+}
 
 /// 保存する位置(論理ピクセル)。
 ///
@@ -199,10 +362,17 @@ fn restore_and_show<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
 
 /// メニューバーのトレイアイコンとメニューを作る。
 fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    let status = MenuItem::with_id(
+        app,
+        MENU_STATUS,
+        "追跡中のセッションなし",
+        false,
+        None::<&str>,
+    )?;
     let click_through = CheckMenuItem::with_id(
         app,
         MENU_CLICK_THROUGH,
-        "クリック透過",
+        "クリック透過(常時)",
         true,
         false,
         None::<&str>,
@@ -227,13 +397,23 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         follow_all_initial,
         None::<&str>,
     )?;
+    let open_config = MenuItem::with_id(
+        app,
+        MENU_OPEN_CONFIG,
+        "設定ファイルを開く",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "終了", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
+            &status,
+            &PredefinedMenuItem::separator(app)?,
             &click_through,
             &always_on_top,
             &follow_all,
+            &open_config,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -263,7 +443,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
             .collect();
         let debug = Submenu::with_items(app, "デバッグ", true, &refs)?;
-        menu.insert(&debug, 3)?;
+        menu.insert(&debug, 6)?;
     }
 
     // アイコン無しで作ると macOS では幅ゼロの項目になって見えないので、必ず埋め込み画像を使う。
@@ -281,13 +461,19 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let tray = tray
         .on_menu_event(move |app, event| match event.id().as_ref() {
             MENU_CLICK_THROUGH => {
+                // 実際の切り替えは cursor_watch が行う
                 let on = click_through.is_checked().unwrap_or(false);
-                if let Some(window) = character_window(app) {
-                    if let Err(e) = window.set_ignore_cursor_events(on) {
-                        eprintln!("set_ignore_cursor_events failed: {e}");
-                    }
+                if let Some(ui) = app.try_state::<Arc<Interaction>>() {
+                    ui.manual_click_through.store(on, Ordering::Relaxed);
                 }
             }
+            MENU_PIN_PANEL => {
+                if let Some(ui) = app.try_state::<Arc<Interaction>>() {
+                    let pinned = !ui.panel_pinned.load(Ordering::Relaxed);
+                    set_panel_pinned(app, &ui, pinned);
+                }
+            }
+            MENU_OPEN_CONFIG => open_config_file(app),
             MENU_ALWAYS_ON_TOP => {
                 let on = always_on_top.is_checked().unwrap_or(true);
                 if let Some(window) = character_window(app) {
@@ -324,7 +510,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .build(app)?;
-    app.manage(TrayHandle(tray));
+    app.manage(TrayHandle { tray, status });
 
     Ok(())
 }
@@ -349,6 +535,8 @@ pub fn run() {
             let token = config::load_or_create_token(app.handle())?;
             let core = Arc::new(Core::new(Tracker::new(config.tracker_config()), token));
             app.manage(core.clone());
+            let ui = Arc::new(Interaction::default());
+            app.manage(ui.clone());
 
             build_tray(app.handle())?;
             restore_and_show(app.handle())?;
@@ -360,10 +548,15 @@ pub fn run() {
                 config.port,
             ));
             tauri::async_runtime::spawn(server::ticker(app.handle().clone(), core));
+            tauri::async_runtime::spawn(cursor_watch(app.handle().clone(), ui));
             bridge::start_demo_loop_if_requested(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![frontend_log, bridge::get_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            frontend_log,
+            bridge::get_snapshot,
+            show_context_menu
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
@@ -374,4 +567,57 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn win() -> (LogicalPosition<f64>, LogicalSize<f64>) {
+        (
+            LogicalPosition::new(100.0, 200.0),
+            LogicalSize::new(280.0, 420.0),
+        )
+    }
+
+    #[test]
+    fn cursor_inside_figure_is_over() {
+        let (p, z) = win();
+        // figure は x 120..360, y 300..620
+        assert!(cursor_over_figure(LogicalPosition::new(200.0, 500.0), p, z));
+        assert!(cursor_over_figure(LogicalPosition::new(121.0, 301.0), p, z));
+    }
+
+    #[test]
+    fn cursor_in_bubble_area_or_outside_is_not_over() {
+        let (p, z) = win();
+        // 吹き出しの余白(上部 100px)は対象外
+        assert!(!cursor_over_figure(
+            LogicalPosition::new(200.0, 230.0),
+            p,
+            z
+        ));
+        // ウィンドウの外
+        assert!(!cursor_over_figure(LogicalPosition::new(50.0, 500.0), p, z));
+        assert!(!cursor_over_figure(
+            LogicalPosition::new(200.0, 700.0),
+            p,
+            z
+        ));
+    }
+
+    #[test]
+    fn hover_margin_keeps_drag_alive_near_the_edge() {
+        let (p, z) = win();
+        assert!(cursor_over_figure(
+            LogicalPosition::new(120.0 - HOVER_MARGIN + 1.0, 500.0),
+            p,
+            z
+        ));
+        assert!(!cursor_over_figure(
+            LogicalPosition::new(120.0 - HOVER_MARGIN - 1.0, 500.0),
+            p,
+            z
+        ));
+    }
 }
