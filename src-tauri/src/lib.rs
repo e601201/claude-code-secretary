@@ -6,8 +6,10 @@
 mod bridge;
 mod channel;
 mod config;
+mod notify;
 mod persona;
 mod server;
+mod settings;
 
 use std::{
     fs,
@@ -29,7 +31,7 @@ use tauri::{
 
 use bridge::SnapshotBridge;
 use secretary_core::{
-    channel::CHANNEL_SOCKET_FILENAME, AssistantState, FollowPolicy, SecretarySnapshot, Tracker,
+    channel::CHANNEL_SOCKET_FILENAME, AssistantState, FollowPolicy, SecretarySnapshot,
 };
 use server::Core;
 
@@ -43,7 +45,8 @@ const MENU_QUIT: &str = "quit";
 const MENU_FOLLOW_ALL: &str = "follow_all";
 const MENU_STATUS: &str = "status";
 const MENU_PIN_PANEL: &str = "pin_panel";
-const MENU_OPEN_CONFIG: &str = "open_config";
+const MENU_OPEN_SETTINGS: &str = "open_settings";
+const MENU_AUTOSTART: &str = "autostart";
 const MENU_TALK: &str = "talk";
 /// webview が購読する、入力欄を開くイベント(Phase 10)。
 pub const COMPOSER_EVENT: &str = "secretary://composer";
@@ -57,7 +60,10 @@ const MENU_DEMO_STATE_PREFIX: &str = "demo_state_";
 const STATE_FILENAME: &str = "window-state.json";
 /// 初回配置のときの画面端からの余白(論理ピクセル)。
 const EDGE_MARGIN: f64 = 24.0;
-/// キャラクター(#figure)の大きさ。index.html / styles.css と合わせる。
+/// ウィンドウの基準サイズ(scale = 1.0)。tauri.conf.json と styles.css の #stage と合わせる。
+const BASE_WIDTH: f64 = 280.0;
+const BASE_HEIGHT: f64 = 420.0;
+/// キャラクター(#figure)の大きさ(scale = 1.0)。index.html / styles.css と合わせる。
 const FIGURE_WIDTH: f64 = 240.0;
 const FIGURE_HEIGHT: f64 = 320.0;
 /// キャラクターの矩形の周囲で、まだ「触れている」とみなす余白(論理ピクセル)。
@@ -108,17 +114,35 @@ pub fn update_tray_status<R: Runtime>(app: &AppHandle<R>, snapshot: &SecretarySn
 }
 
 /// カーソル(論理座標)がキャラクターの矩形(余白込み)に入っているか。
+/// ウィンドウは基準サイズの scale 倍なので、キャラクターの矩形も同じ倍率で見る。
 fn cursor_over_figure(
     cursor: LogicalPosition<f64>,
     window_pos: LogicalPosition<f64>,
     window_size: LogicalSize<f64>,
 ) -> bool {
-    let fx = window_pos.x + (window_size.width - FIGURE_WIDTH) / 2.0;
-    let fy = window_pos.y + window_size.height - FIGURE_HEIGHT;
-    cursor.x >= fx - HOVER_MARGIN
-        && cursor.x < fx + FIGURE_WIDTH + HOVER_MARGIN
-        && cursor.y >= fy - HOVER_MARGIN
-        && cursor.y < fy + FIGURE_HEIGHT + HOVER_MARGIN
+    let scale = (window_size.width / BASE_WIDTH).max(0.1);
+    let (fw, fh, margin) = (
+        FIGURE_WIDTH * scale,
+        FIGURE_HEIGHT * scale,
+        HOVER_MARGIN * scale,
+    );
+    let fx = window_pos.x + (window_size.width - fw) / 2.0;
+    let fy = window_pos.y + window_size.height - fh;
+    cursor.x >= fx - margin
+        && cursor.x < fx + fw + margin
+        && cursor.y >= fy - margin
+        && cursor.y < fy + fh + margin
+}
+
+/// キャラクターウィンドウを基準サイズの `scale` 倍にする。webview 側は幅から倍率を読む。
+pub fn apply_scale<R: Runtime>(app: &AppHandle<R>, scale: f64) {
+    let Some(window) = character_window(app) else {
+        return;
+    };
+    let scale = scale.clamp(config::MIN_SCALE, config::MAX_SCALE);
+    if let Err(e) = window.set_size(LogicalSize::new(BASE_WIDTH * scale, BASE_HEIGHT * scale)) {
+        eprintln!("set_size failed: {e}");
+    }
 }
 
 /// カーソルがウィンドウの矩形に入っているか。入力欄やボタンを出している間はこちらで判定する。
@@ -175,16 +199,6 @@ async fn cursor_watch(app: AppHandle, ui: Arc<Interaction>) {
     }
 }
 
-fn open_config_file<R: Runtime>(app: &AppHandle<R>) {
-    let Ok(dir) = config::config_dir(app) else {
-        return;
-    };
-    let path = dir.join(config::CONFIG_FILENAME);
-    if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
-        eprintln!("open {} failed: {e}", path.display());
-    }
-}
-
 /// 入力欄を開く。メニューから呼ぶので、キー入力を受けられるようウィンドウにフォーカスも移す。
 fn open_composer<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = character_window(app) {
@@ -232,13 +246,7 @@ fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String
                     None::<&str>,
                 )?,
                 &PredefinedMenuItem::separator(&app)?,
-                &MenuItem::with_id(
-                    &app,
-                    MENU_OPEN_CONFIG,
-                    "設定ファイルを開く",
-                    true,
-                    None::<&str>,
-                )?,
+                &MenuItem::with_id(&app, MENU_OPEN_SETTINGS, "設定…", true, None::<&str>)?,
             ],
         )
     };
@@ -441,11 +449,23 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         follow_all_initial,
         None::<&str>,
     )?;
-    let open_config = MenuItem::with_id(
+    let open_settings = MenuItem::with_id(app, MENU_OPEN_SETTINGS, "設定…", true, None::<&str>)?;
+    // 開発版の実行ファイルはビルド版の場所に無いので、自動起動はビルド版でだけ切り替えられる
+    let autostart_available = !cfg!(debug_assertions);
+    let autostart_initial = {
+        use tauri_plugin_autostart::ManagerExt;
+        autostart_available && app.autolaunch().is_enabled().unwrap_or(false)
+    };
+    let autostart = CheckMenuItem::with_id(
         app,
-        MENU_OPEN_CONFIG,
-        "設定ファイルを開く",
-        true,
+        MENU_AUTOSTART,
+        if autostart_available {
+            "ログイン時に起動"
+        } else {
+            "ログイン時に起動(ビルド版のみ)"
+        },
+        autostart_available,
+        autostart_initial,
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "終了", true, None::<&str>)?;
@@ -459,7 +479,8 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             &click_through,
             &always_on_top,
             &follow_all,
-            &open_config,
+            &autostart,
+            &open_settings,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -489,7 +510,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
             .collect();
         let debug = Submenu::with_items(app, "デバッグ", true, &refs)?;
-        menu.insert(&debug, 7)?;
+        menu.insert(&debug, 8)?;
     }
 
     // アイコン無しで作ると macOS では幅ゼロの項目になって見えないので、必ず埋め込み画像を使う。
@@ -519,7 +540,24 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     set_panel_pinned(app, &ui, pinned);
                 }
             }
-            MENU_OPEN_CONFIG => open_config_file(app),
+            MENU_OPEN_SETTINGS => settings::open_settings_window(app),
+            MENU_AUTOSTART => {
+                use tauri_plugin_autostart::ManagerExt;
+                let on = autostart.is_checked().unwrap_or(false);
+                let launcher = app.autolaunch();
+                let result = if on {
+                    launcher.enable()
+                } else {
+                    launcher.disable()
+                };
+                match result {
+                    Ok(()) => eprintln!("[autostart] {}", if on { "enabled" } else { "disabled" }),
+                    Err(e) => {
+                        eprintln!("[autostart] failed: {e}");
+                        let _ = autostart.set_checked(!on);
+                    }
+                }
+            }
             MENU_TALK => open_composer(app),
             MENU_ALWAYS_ON_TOP => {
                 let on = always_on_top.is_checked().unwrap_or(true);
@@ -571,7 +609,21 @@ fn frontend_log(message: String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_notification::init())
         .manage(SnapshotBridge::new())
+        // 設定ウィンドウは閉じても隠すだけにして、次に開くときに作り直さない
+        .on_window_event(|window, event| {
+            if window.label() == settings::SETTINGS_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // Dock にアイコンを出さない(macOS)。skipTaskbar は Windows / Linux 専用。
             #[cfg(target_os = "macos")]
@@ -581,17 +633,14 @@ pub fn run() {
             let config = config::load_or_create(app.handle());
             let token = config::load_or_create_token(app.handle())?;
             let persona = persona::Persona::new(persona::load_or_create(app.handle()));
-            let core = Arc::new(Core::new(
-                Tracker::new(config.tracker_config()),
-                persona,
-                token,
-            ));
+            let core = Arc::new(Core::new(config.clone(), persona, token));
             app.manage(core.clone());
             let ui = Arc::new(Interaction::default());
             app.manage(ui.clone());
 
             build_tray(app.handle())?;
             restore_and_show(app.handle())?;
+            apply_scale(app.handle(), config.scale);
 
             // hook 受信サーバーと、一時状態の期限切れを反映する定期処理
             tauri::async_runtime::spawn(server::serve(
@@ -613,7 +662,12 @@ pub fn run() {
             show_context_menu,
             set_interactive,
             channel::send_prompt,
-            channel::respond_permission
+            channel::respond_permission,
+            settings::settings_info,
+            settings::save_config,
+            settings::set_autostart,
+            settings::open_path,
+            settings::reload_persona
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -659,6 +713,27 @@ mod tests {
         assert!(!cursor_over_figure(LogicalPosition::new(50.0, 500.0), p, z));
         assert!(!cursor_over_figure(
             LogicalPosition::new(200.0, 700.0),
+            p,
+            z
+        ));
+    }
+
+    #[test]
+    fn figure_rect_scales_with_the_window() {
+        // 2 倍: figure は x 140..620, y 400..1040、余白 32
+        let (p, z) = (
+            LogicalPosition::new(100.0, 200.0),
+            LogicalSize::new(560.0, 840.0),
+        );
+        assert!(cursor_over_figure(LogicalPosition::new(150.0, 500.0), p, z));
+        assert!(cursor_over_figure(LogicalPosition::new(110.0, 500.0), p, z));
+        assert!(!cursor_over_figure(
+            LogicalPosition::new(100.0, 500.0),
+            p,
+            z
+        ));
+        assert!(!cursor_over_figure(
+            LogicalPosition::new(300.0, 360.0),
             p,
             z
         ));

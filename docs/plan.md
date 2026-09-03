@@ -732,13 +732,13 @@ SpeechBubble
 
 ## 15. Phase 11 ― 常駐、仕上げ
 
-**2026-09-03 判断: Windows対応は行わない。** 以下のWindows関連の項目は参考として残すが、着手しない。
+**2026-09-03 完了（Windows対応は行わない判断のまま）。**
 
-- ログイン時の自動起動（`tauri-plugin-autostart`）
-- 通知（`tauri-plugin-notification`）。waitingへ入ったときに通知を出す
-- 設定画面（追跡対象cwd、ポート、表示サイズ、文言辞書のパス）
-- Windows対応。透明ウィンドウは `macos-private-api` 不要。装飾なしウィンドウでは `shadow: false` が必須。トレイはそのまま使える。`secretary-hook` はRust製なのでそのまま動く。実機での検証を必ず行う
-- アニメーションと素材のブラッシュアップ
+- **設定画面**: トレイと右クリックの「設定…」で `settings` ウィンドウを開く（`settings.html`、`src/settings/`、`src-tauri/src/settings.rs`）。閉じても隠すだけで、次回はすぐ出る。項目は表示の大きさ（0.5〜2.0倍）、追跡するセッション（Discord/秘書だけ・すべて・session_id固定）、作業ディレクトリの前方一致、許可待ちの通知、ログイン時の起動、ポート、保持秒数、失効秒数、吹き出しの文字数、設定ファイルと口調の辞書を開くボタン、辞書の読み直し。保存は `config.toml` を書き直してから `Core::apply_config` で反映する。ポート以外はその場で効き、ポートは再起動が要る。値は `AppConfig::normalized` で安全な範囲に収める。
+- **表示の大きさ**: `config.toml` の `scale`。ウィンドウを基準サイズ（280×420）の倍数にし、webview 側は幅から倍率を読んで `#stage` に `zoom` を掛ける。カーソル判定（`cursor_over_figure`）も同じ倍率で見る。
+- **通知**: `notify_on_waiting`（既定 true）。スナップショットが許可待ちに「入った」瞬間だけ、吹き出しの文言を本文にして通知する（`src-tauri/src/notify.rs`）。ビルド版は `tauri-plugin-notification`、開発版（`tauri dev`）は実行ファイルが .app に無く通知センターに登録できないので `osascript` で出す（送り主は Script Editor になる）。
+- **自動起動**: `tauri-plugin-autostart`（LaunchAgent）。トレイの「ログイン時に起動」と設定画面のチェックで切り替える。開発版の実行ファイルは vite の dev サーバーが無いと動かないので、開発版では項目を無効にしてビルド版でだけ有効にした。ビルド版は `bun run tauri build` → `target/release/bundle/macos/tauri-app.app`。
+- **やらなかったこと**: Windows対応。アニメーションと素材のブラッシュアップはユーザーの一枚絵（`public/character/base.png`）が入ってから調整する。
 
 ---
 

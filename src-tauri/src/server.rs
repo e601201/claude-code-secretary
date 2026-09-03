@@ -21,11 +21,18 @@ use axum::{
     Router,
 };
 use secretary_core::{
-    ChannelCommand, ChannelEvent, FollowPolicy, HookEnvelope, HookEvent, SecretarySnapshot, Tracker,
+    AssistantState, ChannelCommand, ChannelEvent, FollowPolicy, HookEnvelope, HookEvent,
+    SecretarySnapshot, Tracker,
 };
 use tauri::{AppHandle, Runtime};
 
-use crate::{bridge, channel::ChannelHub, persona::Persona};
+use crate::{
+    bridge,
+    channel::ChannelHub,
+    config::AppConfig,
+    notify,
+    persona::{Persona, PersonaConfig},
+};
 
 /// 送り先の channel が無いときの案内。吹き出しにそのまま出す。
 pub const NO_CHANNEL_HINT: &str =
@@ -38,17 +45,37 @@ pub struct Core {
     token: String,
     last_published: Mutex<Option<SecretarySnapshot>>,
     hub: ChannelHub,
+    config: Mutex<AppConfig>,
 }
 
 impl Core {
-    pub fn new(tracker: Tracker, persona: Persona, token: String) -> Self {
+    pub fn new(config: AppConfig, persona: Persona, token: String) -> Self {
         Self {
-            tracker: Mutex::new(tracker),
+            tracker: Mutex::new(Tracker::new(config.tracker_config())),
             persona: Mutex::new(persona),
             token,
             last_published: Mutex::new(None),
             hub: ChannelHub::default(),
+            config: Mutex::new(config),
         }
+    }
+
+    pub fn config(&self) -> AppConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    /// 設定を差し替える。追跡方針や保持時間はその場で効く。ポートは再起動が要る。
+    pub fn apply_config(&self, config: AppConfig) {
+        self.tracker
+            .lock()
+            .unwrap()
+            .update_config(config.tracker_config());
+        *self.config.lock().unwrap() = config;
+    }
+
+    /// 口調の辞書を読み直したときに差し替える。
+    pub fn reload_persona(&self, cfg: PersonaConfig) {
+        *self.persona.lock().unwrap() = Persona::new(cfg);
     }
 
     pub fn hub(&self) -> &ChannelHub {
@@ -73,7 +100,15 @@ impl Core {
     }
 
     /// 現在のスナップショット(人格で飾ったもの)が前回配信と異なれば返す(そして記録する)。
+    #[cfg(test)]
     pub fn changed_snapshot(&self) -> Option<SecretarySnapshot> {
+        self.changed_snapshot_with_prev().map(|(_, s)| s)
+    }
+
+    /// `changed_snapshot` に加えて、前回配信した状態も返す(通知の判定用)。
+    pub fn changed_snapshot_with_prev(
+        &self,
+    ) -> Option<(Option<AssistantState>, SecretarySnapshot)> {
         let now = Instant::now();
         let mut snapshot = self.tracker.lock().unwrap().snapshot(now);
         self.persona.lock().unwrap().decorate(&mut snapshot, now);
@@ -81,8 +116,9 @@ impl Core {
         if last.as_ref() == Some(&snapshot) {
             return None;
         }
+        let prev = last.as_ref().map(|s| s.status);
         *last = Some(snapshot.clone());
-        Some(snapshot)
+        Some((prev, snapshot))
     }
 
     pub fn expire_stale(&self) -> usize {
@@ -234,13 +270,16 @@ fn short(session_id: &str) -> String {
 
 /// 変化があれば webview へ配信する。イベント適用後と定期処理から呼ぶ。
 pub fn refresh<R: Runtime>(app: &AppHandle<R>, core: &Core) {
-    if let Some(snapshot) = core.changed_snapshot() {
+    if let Some((prev, snapshot)) = core.changed_snapshot_with_prev() {
         eprintln!(
             "[snapshot] {:?} session={} message={:?}",
             snapshot.status,
             snapshot.session_label.as_deref().unwrap_or("-"),
             snapshot.message.as_deref().unwrap_or("")
         );
+        if core.config().notify_on_waiting {
+            notify::on_transition(app, prev, &snapshot);
+        }
         bridge::publish(app, snapshot);
     }
 }
@@ -426,17 +465,37 @@ pub async fn ticker(app: AppHandle, core: Arc<Core>) {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use secretary_core::{AssistantState, TrackerConfig};
 
     fn core() -> Core {
         Core::new(
-            Tracker::new(TrackerConfig {
-                follow: FollowPolicy::All,
+            AppConfig {
+                follow: "all".into(),
                 ..Default::default()
-            }),
+            },
             Persona::new(crate::persona::PersonaConfig::default()),
             "secret".into(),
         )
+    }
+
+    #[test]
+    fn apply_config_switches_follow_and_reports_previous_status() {
+        let core = core();
+        core.ingest(
+            r#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","cwd":"/x","prompt":"hi"}"#,
+        )
+        .unwrap();
+        let (prev, snap) = core.changed_snapshot_with_prev().unwrap();
+        assert_eq!(prev, None);
+        assert_eq!(snap.status, AssistantState::Thinking);
+        core.apply_config(AppConfig {
+            follow: "discord".into(),
+            ..Default::default()
+        });
+        assert_eq!(core.follow(), FollowPolicy::Channel);
+        let (prev, snap) = core.changed_snapshot_with_prev().unwrap();
+        assert_eq!(prev, Some(AssistantState::Thinking));
+        assert_eq!(snap.tracked_sessions, 0);
+        assert_eq!(core.config().follow, "discord");
     }
 
     #[test]

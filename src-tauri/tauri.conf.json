@@ -29,6 +29,18 @@
         "skipTaskbar": true,
         "acceptFirstMouse": true,
         "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "秘書の設定",
+        "url": "settings.html",
+        "width": 480,
+        "height": 640,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": true,
+        "visible": false,
+        "center": true
       }
     ],
     "security": {

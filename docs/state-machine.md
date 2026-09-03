@@ -164,6 +164,10 @@ UI に渡す唯一の構造。`ts-rs` が `src/generated/SecretarySnapshot.ts` �
 | `stale_after` | 30 分 | `TrackerConfig` |
 | `follow` | `Channel` | `TrackerConfig` |
 | `cwd_prefixes` | 空 | `TrackerConfig` |
+| `scale` | 1.0 | `AppConfig`（アプリ側。表示の大きさ、0.5〜2.0） |
+| `notify_on_waiting` | true | `AppConfig`（アプリ側。許可待ちに入ったら通知） |
+
+`TrackerConfig` は設定画面の保存で `Tracker::update_config` によりその場で差し替わる。
 
 ---
 

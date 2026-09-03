@@ -62,6 +62,11 @@ impl Tracker {
         self.cfg.follow = policy;
     }
 
+    /// 設定を丸ごと差し替える(設定画面の保存)。セッションはそのまま。
+    pub fn update_config(&mut self, cfg: TrackerConfig) {
+        self.cfg = cfg;
+    }
+
     /// JSON 文字列をそのまま適用する。hook スクリプトや HTTP サーバーから呼ぶ入口。
     pub fn apply_json(&mut self, json: &str, now: Instant) -> serde_json::Result<HookEvent> {
         let env = HookEnvelope::parse(json)?;

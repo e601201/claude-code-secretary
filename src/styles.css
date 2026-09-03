@@ -14,8 +14,9 @@ body {
 /* ステージ。ウィンドウ全体がドラッグ領域。上部は吹き出しの余白 */
 #stage {
   position: relative;
-  width: 100vw;
-  height: 100vh;
+  /* 基準サイズ。ウィンドウが scale 倍のときは main.ts が zoom で合わせる */
+  width: 280px;
+  height: 420px;
   display: flex;
   align-items: flex-end;
   justify-content: center;

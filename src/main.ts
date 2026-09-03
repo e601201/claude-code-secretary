@@ -17,6 +17,14 @@ const SNAPSHOT_EVENT = "secretary://snapshot";
 const PANEL_PIN_EVENT = "secretary://panel-pin";
 /** Rust 側 lib.rs の COMPOSER_EVENT と一致させる */
 const COMPOSER_EVENT = "secretary://composer";
+/** ウィンドウの基準幅。Rust 側 lib.rs の BASE_WIDTH と一致させる */
+const BASE_WIDTH = 280;
+
+/** ウィンドウが基準サイズの何倍かを幅から読み、ステージ全体を同じ倍率にする */
+function applyZoom(stage: HTMLElement): void {
+  const zoom = Math.max(0.1, window.innerWidth / BASE_WIDTH);
+  stage.style.setProperty("zoom", zoom.toFixed(3));
+}
 
 /** Rust 側の標準エラー出力に流す診断ログ。Tauri 外(素のブラウザ)では無視する */
 function log(message: string): void {
@@ -52,6 +60,9 @@ async function main(): Promise<void> {
   ) {
     return;
   }
+
+  applyZoom(stage);
+  window.addEventListener("resize", () => applyZoom(stage));
 
   const character = new Character(stage, img, badge, log);
   const bubble = new SpeechBubble(bubbleEl, bubbleText, log, {

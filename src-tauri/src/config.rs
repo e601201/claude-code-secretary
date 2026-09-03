@@ -6,13 +6,15 @@ use std::{fs, io, path::PathBuf, time::Duration};
 use secretary_core::{FollowPolicy, HoldConfig, TrackerConfig};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime};
+use ts_rs::TS;
 
 pub const CONFIG_FILENAME: &str = "config.toml";
 pub const TOKEN_FILENAME: &str = "token";
 pub const DEFAULT_PORT: u16 = 47831;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(default)]
+#[ts(export)]
 pub struct AppConfig {
     /// hook を受け付けるポート(127.0.0.1 のみ)
     pub port: u16,
@@ -23,9 +25,18 @@ pub struct AppConfig {
     pub success_hold_secs: f64,
     pub error_hold_secs: f64,
     /// この秒数イベントが無いセッションは失効させる
+    #[ts(type = "number")]
     pub stale_after_secs: u64,
+    #[ts(type = "number")]
     pub max_message_chars: usize,
+    /// キャラクターの大きさ(1.0 = 280x420)。0.5〜2.0
+    pub scale: f64,
+    /// 許可待ちになったら OS の通知を出す
+    pub notify_on_waiting: bool,
 }
+
+pub const MIN_SCALE: f64 = 0.5;
+pub const MAX_SCALE: f64 = 2.0;
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -39,6 +50,8 @@ impl Default for AppConfig {
             error_hold_secs: hold.error_hold.as_secs_f64(),
             stale_after_secs: tracker.stale_after.as_secs(),
             max_message_chars: hold.max_message_chars,
+            scale: 1.0,
+            notify_on_waiting: true,
         }
     }
 }
@@ -69,11 +82,48 @@ impl AppConfig {
         }
     }
 
+    /// 設定画面から来た値を安全な範囲に収める。
+    pub fn normalized(mut self) -> Self {
+        if !self.scale.is_finite() {
+            self.scale = 1.0;
+        }
+        self.scale = (self.scale * 10.0).round() / 10.0;
+        self.scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
+        self.port = self.port.max(1);
+        self.success_hold_secs = self.success_hold_secs.max(0.0);
+        self.error_hold_secs = self.error_hold_secs.max(0.0);
+        self.stale_after_secs = self.stale_after_secs.max(60);
+        self.max_message_chars = self.max_message_chars.clamp(8, 400);
+        self.follow = self.follow.trim().to_string();
+        if self.follow.is_empty() {
+            self.follow = "discord".to_string();
+        }
+        self.cwd_prefixes = self
+            .cwd_prefixes
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self
+    }
+
     /// 初回に書き出す、コメント付きの設定ファイル。
     pub fn template() -> String {
-        let d = Self::default();
+        Self::default().render()
+    }
+
+    /// この設定をコメント付きの TOML にする。設定画面の保存でも使う。
+    pub fn render(&self) -> String {
+        let d = self;
+        let prefixes = d
+            .cwd_prefixes
+            .iter()
+            .map(|p| format!("{:?}", p))
+            .collect::<Vec<_>>()
+            .join(", ");
         format!(
-            "# Claude Code デスクトップ秘書の設定。変更後はアプリを再起動する。\n\
+            "# Claude Code デスクトップ秘書の設定。トレイの「設定…」からも変更できる。\n\
+             # ポート以外はその場で反映される。ポートを変えたらアプリを再起動する。\n\
              \n\
              # hook を受け付けるポート(127.0.0.1 のみ)。hook スクリプト側の SECRETARY_PORT と合わせる。\n\
              port = {port}\n\
@@ -82,7 +132,7 @@ impl AppConfig {
              follow = \"{follow}\"\n\
              \n\
              # 空でなければ、cwd がこのいずれかで始まるセッションだけを対象にする\n\
-             cwd_prefixes = []\n\
+             cwd_prefixes = [{prefixes}]\n\
              \n\
              # 一時状態の表示秒数\n\
              success_hold_secs = {success}\n\
@@ -92,15 +142,31 @@ impl AppConfig {
              stale_after_secs = {stale}\n\
              \n\
              # 吹き出し文言の最大文字数\n\
-             max_message_chars = {chars}\n",
+             max_message_chars = {chars}\n\
+             \n\
+             # キャラクターの大きさ(1.0 = 280x420)。0.5〜2.0\n\
+             scale = {scale:?}\n\
+             \n\
+             # 許可待ちになったら OS の通知を出す\n\
+             notify_on_waiting = {notify}\n",
             port = d.port,
             follow = d.follow,
+            prefixes = prefixes,
             success = d.success_hold_secs,
             error = d.error_hold_secs,
             stale = d.stale_after_secs,
             chars = d.max_message_chars,
+            scale = d.scale,
+            notify = d.notify_on_waiting,
         )
     }
+}
+
+/// 設定を書き出す(設定画面の保存)。
+pub fn save<R: Runtime>(app: &AppHandle<R>, cfg: &AppConfig) -> io::Result<()> {
+    let dir = config_dir(app).map_err(|e| io::Error::other(e.to_string()))?;
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(CONFIG_FILENAME), cfg.render())
 }
 
 pub fn config_dir<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<PathBuf> {
@@ -213,6 +279,30 @@ mod tests {
             .follow_policy(),
             FollowPolicy::Session("abc-123".into())
         );
+    }
+
+    #[test]
+    fn render_round_trips_and_normalized_clamps() {
+        let cfg = AppConfig {
+            follow: "  all ".into(),
+            cwd_prefixes: vec![" /a ".into(), "".into(), "/b\"q".into()],
+            scale: 2.74,
+            notify_on_waiting: false,
+            max_message_chars: 1000,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(cfg.follow, "all");
+        assert_eq!(cfg.cwd_prefixes, vec!["/a", "/b\"q"]);
+        assert_eq!(cfg.scale, MAX_SCALE);
+        assert_eq!(cfg.max_message_chars, 400);
+        assert_eq!(AppConfig::parse(&cfg.render()).unwrap(), cfg);
+        let nan = AppConfig {
+            scale: f64::NAN,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(nan.scale, 1.0);
     }
 
     #[test]

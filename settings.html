@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>秘書の設定</title>
+    <link rel="stylesheet" href="/src/settings/settings.css" />
+    <script type="module" src="/src/settings/settings.ts" defer></script>
+  </head>
+  <body>
+    <form id="form" autocomplete="off">
+      <section>
+        <h2>表示</h2>
+        <label class="row">
+          <span>大きさ</span>
+          <input id="scale" name="scale" type="range" min="0.5" max="2" step="0.1" />
+          <output id="scale-out" for="scale">100%</output>
+        </label>
+      </section>
+
+      <section>
+        <h2>追跡するセッション</h2>
+        <label class="row"><input type="radio" name="follow-mode" value="discord" /> Discord か秘書から話しかけたセッションだけ</label>
+        <label class="row"><input type="radio" name="follow-mode" value="all" /> すべてのセッション</label>
+        <label class="row">
+          <input type="radio" name="follow-mode" value="session" /> 指定した session_id
+          <input id="follow-session" type="text" placeholder="session_id" />
+        </label>
+        <label class="col">
+          <span>作業ディレクトリで絞る(1 行に 1 つ、前方一致。空なら絞らない)</span>
+          <textarea id="cwd-prefixes" rows="3" placeholder="/Users/you/workspace/life"></textarea>
+        </label>
+      </section>
+
+      <section>
+        <h2>通知と常駐</h2>
+        <label class="row"><input id="notify" type="checkbox" /> 許可待ちになったら通知する</label>
+        <label class="row">
+          <input id="autostart" type="checkbox" /> ログイン時に起動する
+          <small id="autostart-note"></small>
+        </label>
+      </section>
+
+      <section>
+        <h2>詳細</h2>
+        <div class="grid">
+          <label><span>ポート</span><input id="port" type="number" min="1024" max="65535" /></label>
+          <label><span>完了の表示秒数</span><input id="success-hold" type="number" min="0" step="0.5" /></label>
+          <label><span>エラーの表示秒数</span><input id="error-hold" type="number" min="0" step="0.5" /></label>
+          <label><span>失効までの秒数</span><input id="stale" type="number" min="60" step="60" /></label>
+          <label><span>吹き出しの最大文字数</span><input id="max-chars" type="number" min="8" max="400" /></label>
+        </div>
+        <p class="hint">ポートを変えたときはアプリの再起動と、hook 側の <code>SECRETARY_PORT</code> の変更が要ります。</p>
+      </section>
+
+      <section>
+        <h2>ファイル</h2>
+        <div class="files">
+          <div class="file"><code id="config-path"></code><button type="button" data-open="config">開く</button></div>
+          <div class="file"><code id="persona-path"></code><button type="button" data-open="persona">開く</button><button type="button" id="reload-persona">読み直す</button></div>
+          <div class="file"><span>設定フォルダ</span><button type="button" data-open="dir">Finder で開く</button></div>
+        </div>
+      </section>
+
+      <footer>
+        <span id="status" aria-live="polite"></span>
+        <button type="submit" id="save">保存</button>
+      </footer>
+    </form>
+  </body>
+</html>
