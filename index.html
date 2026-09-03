@@ -12,11 +12,32 @@
     <div id="stage" data-tauri-drag-region data-state="idle">
       <div id="bubble" data-kind="assistant" aria-live="polite">
         <span id="bubble-text"></span>
+        <!-- channel 経由で中継された権限要求: 内容と、許可 / 拒否ボタン -->
+        <div id="bubble-detail" hidden></div>
+        <div id="bubble-actions" hidden>
+          <button id="perm-allow" type="button">許可</button>
+          <button id="perm-deny" type="button">拒否</button>
+        </div>
       </div>
       <div id="figure">
         <div id="badge" aria-hidden="true"></div>
         <img id="character" alt="" draggable="false" />
+        <!-- 秘書に話しかける入力欄を開く。キャラクターに触れている間だけ見える -->
+        <button id="talk-button" type="button" aria-label="話しかける" title="話しかける">💬</button>
       </div>
+      <!-- 秘書 → Claude Code の入力欄(Phase 10)。Enter で送り、Esc で閉じる -->
+      <form id="composer" hidden autocomplete="off">
+        <input
+          id="composer-input"
+          type="text"
+          placeholder="秘書に話しかける…"
+          enterkeyhint="send"
+          autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
+        />
+        <button id="composer-send" type="submit" aria-label="送る">➤</button>
+      </form>
       <!-- 足元のステータスパネル。作業中などにだけ展開する -->
       <div id="panel">
         <div class="panel-head">

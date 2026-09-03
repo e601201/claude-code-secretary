@@ -1,7 +1,9 @@
 //! hook を受け取る HTTP サーバーと、Tracker を包む Core。
 //!
-//! - `POST /hook`   hook の JSON をそのまま受け取る。`Authorization: Bearer <token>` 必須
-//! - `GET  /health` 稼働確認
+//! - `POST /hook`       hook の JSON をそのまま受け取る。`Authorization: Bearer <token>` 必須
+//! - `GET  /health`     稼働確認
+//! - `POST /say`        本文をそのまま秘書からの指示として channel へ送る(Phase 10、要トークン)
+//! - `POST /permission` `{"request_id":"…","allow":true}` で中継された権限要求に答える(要トークン)
 //!
 //! Core は Tauri に依存しないので、そのまま単体テストできる。
 
@@ -18,10 +20,16 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use secretary_core::{FollowPolicy, HookEnvelope, HookEvent, SecretarySnapshot, Tracker};
+use secretary_core::{
+    ChannelCommand, ChannelEvent, FollowPolicy, HookEnvelope, HookEvent, SecretarySnapshot, Tracker,
+};
 use tauri::{AppHandle, Runtime};
 
-use crate::{bridge, persona::Persona};
+use crate::{bridge, channel::ChannelHub, persona::Persona};
+
+/// 送り先の channel が無いときの案内。吹き出しにそのまま出す。
+pub const NO_CHANNEL_HINT: &str =
+    "秘書につながっているセッションがありません。claude --dangerously-load-development-channels server:secretary で起動してください";
 
 /// Tracker と人格、最後に配信したスナップショット。
 pub struct Core {
@@ -29,6 +37,7 @@ pub struct Core {
     persona: Mutex<Persona>,
     token: String,
     last_published: Mutex<Option<SecretarySnapshot>>,
+    hub: ChannelHub,
 }
 
 impl Core {
@@ -38,7 +47,12 @@ impl Core {
             persona: Mutex::new(persona),
             token,
             last_published: Mutex::new(None),
+            hub: ChannelHub::default(),
         }
+    }
+
+    pub fn hub(&self) -> &ChannelHub {
+        &self.hub
     }
 
     pub fn token(&self) -> &str {
@@ -82,6 +96,140 @@ impl Core {
     pub fn follow(&self) -> FollowPolicy {
         self.tracker.lock().unwrap().config().follow.clone()
     }
+
+    /// channel 子プロセスからのフレームを反映する。
+    pub fn on_channel_event(&self, session_id: &str, cwd: Option<&str>, event: &ChannelEvent) {
+        let now = Instant::now();
+        match event {
+            ChannelEvent::Reply { text } => {
+                eprintln!(
+                    "[channel] reply session={} text={:?}",
+                    short(session_id),
+                    truncate(text, 50)
+                );
+                self.tracker
+                    .lock()
+                    .unwrap()
+                    .note_reply(session_id, cwd, text, now);
+            }
+            ChannelEvent::PermissionRequest(permission) => {
+                eprintln!(
+                    "[channel] permission_request session={} id={} tool={} desc={:?}",
+                    short(session_id),
+                    permission.request_id,
+                    permission.tool_name,
+                    truncate(&permission.description, 50)
+                );
+                self.tracker.lock().unwrap().note_relayed_permission(
+                    session_id,
+                    cwd,
+                    permission.clone(),
+                    now,
+                );
+            }
+            ChannelEvent::Hello { .. } => {}
+        }
+    }
+
+    /// channel が切れたら、その接続でしか答えられない権限要求のボタンを消す。
+    pub fn on_channel_disconnect(&self, session_id: &str) {
+        self.tracker
+            .lock()
+            .unwrap()
+            .clear_relayed_permission(session_id);
+    }
+
+    /// 秘書からの指示を送る。送り先は表示中のセッション、無ければ最新の接続。ラベルを返す。
+    pub fn send_prompt(&self, text: &str) -> Result<String, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("空の指示は送れません".to_string());
+        }
+        let preferred = self
+            .last_published
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.session_id.clone());
+        let target = self
+            .hub
+            .pick_target(preferred.as_deref())
+            .ok_or_else(|| NO_CHANNEL_HINT.to_string())?;
+        self.hub.send(
+            &target,
+            ChannelCommand::SendPrompt {
+                text: text.to_string(),
+            },
+        )?;
+        eprintln!(
+            "[channel] send_prompt session={} text={:?}",
+            short(&target),
+            truncate(text, 50)
+        );
+        Ok(self.session_label(&target))
+    }
+
+    /// 中継された権限要求に答える。session_id が無ければ request_id から探す。
+    pub fn respond_permission(
+        &self,
+        session_id: Option<&str>,
+        request_id: &str,
+        allow: bool,
+    ) -> Result<(), String> {
+        let session = match session_id {
+            Some(s) => s.to_string(),
+            None => self
+                .tracker
+                .lock()
+                .unwrap()
+                .sessions()
+                .find(|s| {
+                    s.relayed_permission()
+                        .map(|p| p.request_id.as_str() == request_id)
+                        .unwrap_or(false)
+                })
+                .map(|s| s.id().to_string())
+                .ok_or_else(|| format!("権限要求 {request_id} は見つかりません"))?,
+        };
+        self.hub.send(
+            &session,
+            ChannelCommand::RespondPermission {
+                request_id: request_id.to_string(),
+                allow,
+            },
+        )?;
+        self.tracker
+            .lock()
+            .unwrap()
+            .resolve_relayed_permission(&session);
+        eprintln!(
+            "[channel] permission {} id={request_id} session={}",
+            if allow { "allow" } else { "deny" },
+            short(&session)
+        );
+        Ok(())
+    }
+
+    fn session_label(&self, session_id: &str) -> String {
+        if let Some(s) = self.tracker.lock().unwrap().session(session_id) {
+            return s.label();
+        }
+        self.hub
+            .cwd_of(session_id)
+            .as_deref()
+            .and_then(|c| {
+                c.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .map(str::to_string)
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| short(session_id))
+    }
+}
+
+fn short(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
 }
 
 /// 変化があれば webview へ配信する。イベント適用後と定期処理から呼ぶ。
@@ -119,11 +267,14 @@ fn summarize(env: &HookEnvelope) -> String {
         "UserPromptSubmit" => {
             let prompt = env.prompt.as_deref().unwrap_or("");
             let origin = secretary_core::split_channel_tag(prompt);
-            format!(
-                " {}prompt={:?}",
-                if origin.from_discord { "discord " } else { "" },
-                truncate(&origin.body, 50)
-            )
+            let via = if origin.from_discord() {
+                "discord "
+            } else if origin.from_secretary() {
+                "secretary "
+            } else {
+                ""
+            };
+            format!(" {via}prompt={:?}", truncate(&origin.body, 50))
         }
         "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PermissionRequest"
         | "PermissionDenied" => {
@@ -161,7 +312,59 @@ pub fn router(app: AppHandle, core: Arc<Core>) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/hook", post(receive_hook))
+        .route("/say", post(say))
+        .route("/permission", post(permission))
         .with_state(HttpState { app, core })
+}
+
+/// 本文をそのまま指示として送る。スクリプト(`scripts/say.sh`)から使う。
+async fn say(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, String) {
+    if !authorized(&headers, state.core.token()) {
+        return (StatusCode::UNAUTHORIZED, String::new());
+    }
+    let text = String::from_utf8_lossy(&body);
+    let result = state.core.send_prompt(&text);
+    refresh(&state.app, &state.core);
+    match result {
+        Ok(label) => (StatusCode::OK, label),
+        Err(e) => (StatusCode::CONFLICT, e),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PermissionBody {
+    request_id: String,
+    allow: bool,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+async fn permission(
+    State(state): State<HttpState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, String) {
+    if !authorized(&headers, state.core.token()) {
+        return (StatusCode::UNAUTHORIZED, String::new());
+    }
+    let parsed: PermissionBody = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    let result = state.core.respond_permission(
+        parsed.session_id.as_deref(),
+        &parsed.request_id,
+        parsed.allow,
+    );
+    refresh(&state.app, &state.core);
+    match result {
+        Ok(()) => (StatusCode::NO_CONTENT, String::new()),
+        Err(e) => (StatusCode::CONFLICT, e),
+    }
 }
 
 async fn receive_hook(
@@ -302,9 +505,46 @@ mod tests {
             r#"{"session_id":"s1","hook_event_name":"UserPromptSubmit","cwd":"/x","prompt":"hi"}"#,
         )
         .unwrap();
-        core.set_follow(FollowPolicy::Discord);
-        assert_eq!(core.follow(), FollowPolicy::Discord);
+        core.set_follow(FollowPolicy::Channel);
+        assert_eq!(core.follow(), FollowPolicy::Channel);
         assert_eq!(core.changed_snapshot().map(|s| s.tracked_sessions), Some(0));
+    }
+
+    #[test]
+    fn send_prompt_without_channel_explains_how_to_start_one() {
+        let core = core();
+        assert_eq!(
+            core.send_prompt("  "),
+            Err("空の指示は送れません".to_string())
+        );
+        assert_eq!(core.send_prompt("直して"), Err(NO_CHANNEL_HINT.to_string()));
+        assert!(core.respond_permission(None, "abcde", true).is_err());
+    }
+
+    #[test]
+    fn relayed_permission_shows_up_in_snapshot_and_disconnect_clears_it() {
+        let core = core();
+        let perm = secretary_core::RelayedPermission {
+            request_id: "abcde".into(),
+            tool_name: "Bash".into(),
+            description: "Run tests".into(),
+            input_preview: "{}".into(),
+        };
+        core.on_channel_event(
+            "s1",
+            Some("/x"),
+            &ChannelEvent::PermissionRequest(perm.clone()),
+        );
+        let snap = core.changed_snapshot().unwrap();
+        assert_eq!(snap.status, AssistantState::Waiting);
+        assert_eq!(snap.relayed_permission, Some(perm));
+        assert_eq!(
+            snap.message_kind,
+            Some(secretary_core::SpeechKind::Permission)
+        );
+        core.on_channel_disconnect("s1");
+        let snap = core.changed_snapshot().unwrap();
+        assert_eq!(snap.relayed_permission, None);
     }
 
     #[test]

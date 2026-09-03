@@ -166,33 +166,56 @@ impl HookEnvelope {
     }
 }
 
-/// Discord プラグイン経由のプロンプトが持つ先頭タグ(Phase 0 で観測)。
-pub const DISCORD_CHANNEL_PREFIX: &str = "<channel source=\"plugin:discord:discord\"";
+/// Discord プラグイン経由のプロンプトの `source` 属性(Phase 0 で観測)。
+pub const DISCORD_CHANNEL_SOURCE: &str = "plugin:discord:discord";
+/// 秘書アプリ自身の channel(Phase 10)。ユーザースコープの MCP サーバー名がそのまま入る。
+pub const SECRETARY_CHANNEL_SOURCE: &str = "secretary";
 
 /// プロンプトの出所と、チャンネルタグを取り除いた本文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptOrigin {
-    pub from_discord: bool,
+    /// `<channel source="…">` の source。通常のターミナル入力なら None
+    pub source: Option<String>,
     pub body: String,
 }
 
-/// `<channel …>本文</channel>` 形式ならタグを剥がし、Discord 由来かを判定する。
+impl PromptOrigin {
+    pub fn from_discord(&self) -> bool {
+        self.source.as_deref() == Some(DISCORD_CHANNEL_SOURCE)
+    }
+
+    pub fn from_secretary(&self) -> bool {
+        self.source.as_deref() == Some(SECRETARY_CHANNEL_SOURCE)
+    }
+
+    /// 秘書が既定で追跡対象とみなす channel(Discord か秘書自身)由来か。
+    pub fn from_followed_channel(&self) -> bool {
+        self.from_discord() || self.from_secretary()
+    }
+}
+
+/// `<channel …>本文</channel>` 形式ならタグを剥がし、source 属性を取り出す。
 pub fn split_channel_tag(prompt: &str) -> PromptOrigin {
     let trimmed = prompt.trim_start();
     if !trimmed.starts_with("<channel ") {
         return PromptOrigin {
-            from_discord: false,
+            source: None,
             body: prompt.trim().to_string(),
         };
     }
-    let from_discord = trimmed.starts_with(DISCORD_CHANNEL_PREFIX);
-    let after_tag = trimmed.find('>').map(|i| &trimmed[i + 1..]).unwrap_or("");
+    let tag_end = trimmed.find('>').unwrap_or(trimmed.len());
+    let tag = &trimmed[..tag_end];
+    let source = tag.find("source=\"").and_then(|i| {
+        let rest = &tag[i + "source=\"".len()..];
+        rest.find('"').map(|j| rest[..j].to_string())
+    });
+    let after_tag = trimmed.get(tag_end + 1..).unwrap_or("");
     let body = match after_tag.rfind("</channel>") {
         Some(end) => &after_tag[..end],
         None => after_tag,
     };
     PromptOrigin {
-        from_discord,
+        source,
         body: body.trim().to_string(),
     }
 }
@@ -206,14 +229,14 @@ mod tests {
     #[test]
     fn detects_discord_origin_and_strips_tag() {
         let origin = split_channel_tag(DISCORD_PROMPT);
-        assert!(origin.from_discord);
+        assert!(origin.from_discord());
         assert_eq!(origin.body, "READMEを要約して");
     }
 
     #[test]
     fn plain_prompt_is_not_discord() {
         let origin = split_channel_tag("  ふつうの指示  ");
-        assert!(!origin.from_discord);
+        assert!(!origin.from_discord());
         assert_eq!(origin.body, "ふつうの指示");
     }
 
@@ -221,8 +244,27 @@ mod tests {
     fn other_channel_is_not_discord_but_still_stripped() {
         let origin =
             split_channel_tag("<channel source=\"plugin:slack:slack\" x=\"1\">hi</channel>");
-        assert!(!origin.from_discord);
+        assert!(!origin.from_discord());
         assert_eq!(origin.body, "hi");
+    }
+
+    #[test]
+    fn secretary_channel_is_recognized() {
+        let origin = split_channel_tag(
+            "<channel source=\"secretary\" chat_id=\"desk\">\n直して\n</channel>",
+        );
+        assert_eq!(origin.source.as_deref(), Some("secretary"));
+        assert!(origin.from_secretary());
+        assert!(origin.from_followed_channel());
+        assert!(!origin.from_discord());
+        assert_eq!(origin.body, "直して");
+    }
+
+    #[test]
+    fn unterminated_tag_yields_empty_body() {
+        let origin = split_channel_tag("<channel source=\"x\"");
+        assert_eq!(origin.source.as_deref(), Some("x"));
+        assert_eq!(origin.body, "");
     }
 
     #[test]

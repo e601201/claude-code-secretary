@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::classify::{classify, reply_text, ToolClass};
+use crate::channel::RelayedPermission;
+use crate::classify::{classify, display_tool_name, reply_text, ToolClass};
 use crate::hook::{split_channel_tag, HookEvent, ToolRef};
 use crate::snapshot::SpeechKind;
 use crate::state::AssistantState;
@@ -52,7 +53,9 @@ struct Transient {
 pub struct SessionState {
     id: String,
     cwd: Option<String>,
-    discord_origin: bool,
+    channel_origin: bool,
+    /// channel 経由で中継され、まだ答えていない権限要求
+    relayed: Option<RelayedPermission>,
     in_turn: bool,
     in_flight: Vec<InFlight>,
     turn_had_failure: bool,
@@ -70,7 +73,8 @@ impl SessionState {
         Self {
             id: id.into(),
             cwd,
-            discord_origin: false,
+            channel_origin: false,
+            relayed: None,
             in_turn: false,
             in_flight: Vec::new(),
             turn_had_failure: false,
@@ -98,9 +102,10 @@ impl SessionState {
         }
     }
 
-    /// Discord 由来のプロンプトを一度でも受け取ったか。
-    pub fn discord_origin(&self) -> bool {
-        self.discord_origin
+    /// 追跡対象の channel(Discord か秘書)由来のプロンプトを一度でも受け取ったか。
+    /// 秘書 channel から権限要求が中継されてきたセッションも含む(channel として登録された証拠なので)。
+    pub fn channel_origin(&self) -> bool {
+        self.channel_origin
     }
 
     pub fn ended(&self) -> bool {
@@ -121,6 +126,55 @@ impl SessionState {
 
     pub fn pending_permission(&self) -> Option<&str> {
         self.waiting.as_deref()
+    }
+
+    /// channel 経由で中継され、秘書から許可 / 拒否を返せる権限要求。
+    pub fn relayed_permission(&self) -> Option<&RelayedPermission> {
+        self.relayed.as_ref()
+    }
+
+    /// 中継された権限要求を登録する。hook の PermissionRequest より先に届くこともあるので、
+    /// 許可待ちの状態と文言もここで揃える。
+    pub fn note_relayed_permission(
+        &mut self,
+        permission: RelayedPermission,
+        now: Instant,
+        cfg: &HoldConfig,
+    ) {
+        self.last_event_at = now;
+        self.channel_origin = true;
+        self.in_turn = true;
+        let name = display_tool_name(&permission.tool_name);
+        if self.speech.as_ref().map(|s| s.kind) != Some(SpeechKind::Permission) {
+            self.set_speech(
+                format!("{name} の実行許可を待っています"),
+                SpeechKind::Permission,
+                cfg,
+            );
+        }
+        if self.waiting.is_none() {
+            self.waiting = Some(name);
+        }
+        self.relayed = Some(permission);
+    }
+
+    /// 秘書から答えたので中継分だけを消す。許可待ちの状態自体は hook の解決
+    /// (PostToolUse / PermissionDenied)が届くまで保つ。
+    pub fn clear_relayed_permission(&mut self) {
+        self.relayed = None;
+    }
+
+    /// 秘書から答えた。答えは Claude Code に届いて許可待ちを解くので、表示も先に進める。
+    pub fn resolve_relayed_permission(&mut self) {
+        self.relayed = None;
+        self.clear_waiting();
+    }
+
+    /// `reply` ツール経由で届いた Claude の返信。hook の PreToolUse と同じ扱いにする。
+    pub fn note_reply(&mut self, text: &str, now: Instant, cfg: &HoldConfig) {
+        self.last_event_at = now;
+        self.set_speech(text.to_string(), SpeechKind::Reply, cfg);
+        self.turn_has_reply = true;
     }
 
     /// 人が読めるラベル。cwd の末尾ディレクトリ名、無ければ session_id の先頭 8 文字。
@@ -182,13 +236,14 @@ impl SessionState {
             }
             HookEvent::UserPromptSubmit { prompt, .. } => {
                 let origin = split_channel_tag(prompt);
-                self.discord_origin |= origin.from_discord;
+                self.channel_origin |= origin.from_followed_channel();
                 self.task_summary = first_line(&origin.body, cfg.max_message_chars);
                 self.in_turn = true;
                 self.in_flight.clear();
                 self.turn_had_failure = false;
                 self.turn_has_reply = false;
                 self.waiting = None;
+                self.relayed = None;
                 self.transient = None;
                 self.speech = None;
             }
@@ -231,12 +286,13 @@ impl SessionState {
             }
             HookEvent::PermissionRequest { tool } => {
                 self.in_turn = true;
-                self.waiting = Some(tool.name.clone());
+                let name = display_tool_name(&tool.name);
                 self.set_speech(
-                    format!("{} の実行許可を待っています", tool.name),
+                    format!("{name} の実行許可を待っています"),
                     SpeechKind::Permission,
                     cfg,
                 );
+                self.waiting = Some(name);
             }
             HookEvent::PermissionDenied { tool, .. } => {
                 self.remove_in_flight(tool);
@@ -305,6 +361,7 @@ impl SessionState {
     /// 許可待ちを解除する。権限要求の文言は用済みなので一緒に消す。
     fn clear_waiting(&mut self) {
         self.waiting = None;
+        self.relayed = None;
         if self.speech.as_ref().map(|s| s.kind) == Some(SpeechKind::Permission) {
             self.speech = None;
         }
@@ -586,7 +643,7 @@ mod tests {
         let mut h = Harness::new();
         let discord = "<channel source=\"plugin:discord:discord\" chat_id=\"1\">\nREADMEを要約して\n</channel>";
         h.apply(prompt(discord));
-        assert!(h.s.discord_origin());
+        assert!(h.s.channel_origin());
         assert_eq!(h.s.task_summary(), Some("READMEを要約して"));
         assert_eq!(
             h.apply(pre(

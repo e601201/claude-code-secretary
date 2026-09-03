@@ -62,9 +62,24 @@ const GIT_READ_ONLY: &[&str] = &[
     "tag",
 ];
 
-/// Discord プラグインの返信ツールか。観測された名前は `mcp__plugin_discord_discord__reply`。
+/// channel の返信ツールか。Discord プラグインは `mcp__plugin_discord_discord__reply`、
+/// 秘書自身の channel(Phase 10)は `mcp__secretary__reply`。
 pub fn is_reply_tool(name: &str) -> bool {
-    name.starts_with("mcp__") && name.contains("discord") && name.ends_with("__reply")
+    name.starts_with("mcp__") && name.ends_with("__reply")
+}
+
+/// 人に見せるツール名。MCP ツール `mcp__<server>__<tool>` は「server: tool」にする。
+/// Discord プラグインの `mcp__plugin_discord_discord__reply` は「discord: reply」。
+pub fn display_tool_name(name: &str) -> String {
+    let Some(rest) = name.strip_prefix("mcp__") else {
+        return name.to_string();
+    };
+    let Some((server, tool)) = rest.split_once("__") else {
+        return name.to_string();
+    };
+    let server = server.strip_prefix("plugin_").unwrap_or(server);
+    let server = server.rsplit('_').next().unwrap_or(server);
+    format!("{server}: {tool}")
 }
 
 /// 返信ツールの本文。
@@ -175,6 +190,34 @@ mod tests {
     #[test]
     fn tool_search_is_auxiliary() {
         assert_eq!(classify("ToolSearch", &json!({})), ToolClass::Auxiliary);
+    }
+
+    #[test]
+    fn secretary_reply_is_reply_but_other_mcp_tools_are_not() {
+        assert_eq!(
+            classify("mcp__secretary__reply", &json!({"text": "x"})),
+            ToolClass::Reply
+        );
+        assert!(!is_reply_tool("mcp__secretary__fetch_messages"));
+        assert!(!is_reply_tool("reply"));
+    }
+
+    #[test]
+    fn display_names_are_short() {
+        assert_eq!(display_tool_name("Bash"), "Bash");
+        assert_eq!(
+            display_tool_name("mcp__secretary__reply"),
+            "secretary: reply"
+        );
+        assert_eq!(
+            display_tool_name("mcp__plugin_discord_discord__reply"),
+            "discord: reply"
+        );
+        assert_eq!(
+            display_tool_name("mcp__pencil__get_style"),
+            "pencil: get_style"
+        );
+        assert_eq!(display_tool_name("mcp__odd"), "mcp__odd");
     }
 
     #[test]

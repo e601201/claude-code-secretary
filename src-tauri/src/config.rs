@@ -16,7 +16,7 @@ pub const DEFAULT_PORT: u16 = 47831;
 pub struct AppConfig {
     /// hook を受け付けるポート(127.0.0.1 のみ)
     pub port: u16,
-    /// 追跡方針: "discord"(Discord 由来のセッションだけ) / "all"(全セッション) / 任意の session_id
+    /// 追跡方針: "discord"(Discord か秘書 channel 由来のセッションだけ) / "all"(全セッション) / 任意の session_id
     pub follow: String,
     /// 空でなければ、cwd がこのいずれかで始まるセッションだけを対象にする
     pub cwd_prefixes: Vec<String>,
@@ -51,7 +51,7 @@ impl AppConfig {
     pub fn follow_policy(&self) -> FollowPolicy {
         match self.follow.trim() {
             "all" => FollowPolicy::All,
-            "" | "discord" => FollowPolicy::Discord,
+            "" | "discord" | "channel" => FollowPolicy::Channel,
             id => FollowPolicy::Session(id.to_string()),
         }
     }
@@ -78,7 +78,7 @@ impl AppConfig {
              # hook を受け付けるポート(127.0.0.1 のみ)。hook スクリプト側の SECRETARY_PORT と合わせる。\n\
              port = {port}\n\
              \n\
-             # 追跡方針: \"discord\" = Discord 由来のセッションだけ / \"all\" = 全セッション / \"<session_id>\" = 固定\n\
+             # 追跡方針: \"discord\" = Discord か秘書 channel 由来のセッションだけ / \"all\" = 全セッション / \"<session_id>\" = 固定\n\
              follow = \"{follow}\"\n\
              \n\
              # 空でなければ、cwd がこのいずれかで始まるセッションだけを対象にする\n\
@@ -195,7 +195,7 @@ mod tests {
                 ..Default::default()
             }
             .follow_policy(),
-            FollowPolicy::Discord
+            FollowPolicy::Channel
         );
         assert_eq!(
             AppConfig {
@@ -203,7 +203,7 @@ mod tests {
                 ..Default::default()
             }
             .follow_policy(),
-            FollowPolicy::Discord
+            FollowPolicy::Channel
         );
         assert_eq!(
             AppConfig {

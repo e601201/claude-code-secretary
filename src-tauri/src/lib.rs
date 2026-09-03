@@ -4,6 +4,7 @@
 //! Dock には出さずメニューバーのトレイから操作する。ウィンドウ位置は再起動後も保つ。
 
 mod bridge;
+mod channel;
 mod config;
 mod persona;
 mod server;
@@ -27,7 +28,9 @@ use tauri::{
 };
 
 use bridge::SnapshotBridge;
-use secretary_core::{AssistantState, FollowPolicy, SecretarySnapshot, Tracker};
+use secretary_core::{
+    channel::CHANNEL_SOCKET_FILENAME, AssistantState, FollowPolicy, SecretarySnapshot, Tracker,
+};
 use server::Core;
 
 /// `tauri.conf.json` の windows[].label と一致させる。
@@ -41,6 +44,9 @@ const MENU_FOLLOW_ALL: &str = "follow_all";
 const MENU_STATUS: &str = "status";
 const MENU_PIN_PANEL: &str = "pin_panel";
 const MENU_OPEN_CONFIG: &str = "open_config";
+const MENU_TALK: &str = "talk";
+/// webview が購読する、入力欄を開くイベント(Phase 10)。
+pub const COMPOSER_EVENT: &str = "secretary://composer";
 /// webview が購読する、パネル固定の切り替えイベント。
 pub const PANEL_PIN_EVENT: &str = "secretary://panel-pin";
 const MENU_DEMO_PLAY: &str = "demo_play";
@@ -72,6 +78,8 @@ pub struct Interaction {
     manual_click_through: AtomicBool,
     /// 右クリックメニューの「今のタスクを表示」。true ならパネルを出しっぱなしにする
     panel_pinned: AtomicBool,
+    /// webview が入力欄や許可ボタンを出している間 true。ウィンドウ全体を当たり判定にする
+    extended: AtomicBool,
 }
 
 fn status_label(state: AssistantState) -> &'static str {
@@ -113,6 +121,18 @@ fn cursor_over_figure(
         && cursor.y < fy + FIGURE_HEIGHT + HOVER_MARGIN
 }
 
+/// カーソルがウィンドウの矩形に入っているか。入力欄やボタンを出している間はこちらで判定する。
+fn cursor_in_window(
+    cursor: LogicalPosition<f64>,
+    window_pos: LogicalPosition<f64>,
+    window_size: LogicalSize<f64>,
+) -> bool {
+    cursor.x >= window_pos.x
+        && cursor.x < window_pos.x + window_size.width
+        && cursor.y >= window_pos.y
+        && cursor.y < window_pos.y + window_size.height
+}
+
 /// カーソルがキャラクターの外にある間だけクリックをすり抜けさせる。
 /// すり抜け中はウィンドウにマウスイベントが届かないので、Rust 側で定期的に位置を見る。
 async fn cursor_watch(app: AppHandle, ui: Arc<Interaction>) {
@@ -132,11 +152,13 @@ async fn cursor_watch(app: AppHandle, ui: Arc<Interaction>) {
                     .map(|m| m.scale_factor())
                     .unwrap_or(1.0);
                 let cursor = window.cursor_position()?.to_logical::<f64>(primary_scale);
-                Ok(cursor_over_figure(
-                    cursor,
-                    window_logical_position(&window)?,
-                    window_logical_size(&window)?,
-                ))
+                let pos = window_logical_position(&window)?;
+                let size = window_logical_size(&window)?;
+                Ok(if ui.extended.load(Ordering::Relaxed) {
+                    cursor_in_window(cursor, pos, size)
+                } else {
+                    cursor_over_figure(cursor, pos, size)
+                })
             })()
             .unwrap_or(true);
             !over
@@ -163,6 +185,24 @@ fn open_config_file<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// 入力欄を開く。メニューから呼ぶので、キー入力を受けられるようウィンドウにフォーカスも移す。
+fn open_composer<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(window) = character_window(app) {
+        if let Err(e) = window.set_focus() {
+            eprintln!("set_focus failed: {e}");
+        }
+    }
+    if let Err(e) = app.emit_to(CHARACTER_WINDOW, COMPOSER_EVENT, true) {
+        eprintln!("emit composer failed: {e}");
+    }
+}
+
+/// webview が入力欄や許可ボタンを出し入れしたときに呼ぶ。
+#[tauri::command]
+fn set_interactive(ui: tauri::State<'_, Arc<Interaction>>, extended: bool) {
+    ui.extended.store(extended, Ordering::Relaxed);
+}
+
 fn set_panel_pinned<R: Runtime>(app: &AppHandle<R>, ui: &Interaction, pinned: bool) {
     ui.panel_pinned.store(pinned, Ordering::Relaxed);
     if let Err(e) = app.emit_to(CHARACTER_WINDOW, PANEL_PIN_EVENT, pinned) {
@@ -181,6 +221,8 @@ fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String
         Menu::with_items(
             &app,
             &[
+                &MenuItem::with_id(&app, MENU_TALK, "話しかける…", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(&app)?,
                 &CheckMenuItem::with_id(
                     &app,
                     MENU_PIN_PANEL,
@@ -201,6 +243,7 @@ fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String
         )
     };
     let menu = build().map_err(|e| e.to_string())?;
+    // 項目の処理はトレイの on_menu_event が担う(メニューイベントはアプリ全体に届く)
     menu.popup(window).map_err(|e| e.to_string())
 }
 
@@ -406,10 +449,12 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "終了", true, None::<&str>)?;
+    let talk = MenuItem::with_id(app, MENU_TALK, "話しかける…", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
             &status,
+            &talk,
             &PredefinedMenuItem::separator(app)?,
             &click_through,
             &always_on_top,
@@ -444,7 +489,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
             .collect();
         let debug = Submenu::with_items(app, "デバッグ", true, &refs)?;
-        menu.insert(&debug, 6)?;
+        menu.insert(&debug, 7)?;
     }
 
     // アイコン無しで作ると macOS では幅ゼロの項目になって見えないので、必ず埋め込み画像を使う。
@@ -475,6 +520,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 }
             }
             MENU_OPEN_CONFIG => open_config_file(app),
+            MENU_TALK => open_composer(app),
             MENU_ALWAYS_ON_TOP => {
                 let on = always_on_top.is_checked().unwrap_or(true);
                 if let Some(window) = character_window(app) {
@@ -489,7 +535,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     core.set_follow(if all {
                         FollowPolicy::All
                     } else {
-                        FollowPolicy::Discord
+                        FollowPolicy::Channel
                     });
                     server::refresh(app, &core);
                 }
@@ -553,6 +599,9 @@ pub fn run() {
                 core.clone(),
                 config.port,
             ));
+            // 秘書 → Claude Code の channel(Phase 10)。secretary-channel 子プロセスがここへ繋ぐ
+            let socket = app.path().app_config_dir()?.join(CHANNEL_SOCKET_FILENAME);
+            tauri::async_runtime::spawn(channel::serve(app.handle().clone(), core.clone(), socket));
             tauri::async_runtime::spawn(server::ticker(app.handle().clone(), core));
             tauri::async_runtime::spawn(cursor_watch(app.handle().clone(), ui));
             bridge::start_demo_loop_if_requested(app.handle().clone());
@@ -561,7 +610,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             frontend_log,
             bridge::get_snapshot,
-            show_context_menu
+            show_context_menu,
+            set_interactive,
+            channel::send_prompt,
+            channel::respond_permission
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

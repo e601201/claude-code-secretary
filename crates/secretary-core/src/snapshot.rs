@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::channel::RelayedPermission;
 use crate::state::AssistantState;
 
 /// 吹き出しの文言の出所。
@@ -33,6 +34,8 @@ pub struct SecretarySnapshot {
     pub task_summary: Option<String>,
     /// 許可を待っているツール名
     pub pending_permission: Option<String>,
+    /// channel 経由で中継され、秘書の吹き出しから許可 / 拒否を返せる権限要求
+    pub relayed_permission: Option<RelayedPermission>,
     pub session_id: Option<String>,
     /// cwd の末尾ディレクトリ名など、人が読めるラベル
     pub session_label: Option<String>,
@@ -49,6 +52,7 @@ impl SecretarySnapshot {
             current_tool: None,
             task_summary: None,
             pending_permission: None,
+            relayed_permission: None,
             session_id: None,
             session_label: None,
             tracked_sessions: 0,

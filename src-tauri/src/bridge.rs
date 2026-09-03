@@ -5,7 +5,7 @@
 
 use std::{sync::Mutex, thread, time::Duration};
 
-use secretary_core::{AssistantState, SecretarySnapshot, SpeechKind};
+use secretary_core::{AssistantState, RelayedPermission, SecretarySnapshot, SpeechKind};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::CHARACTER_WINDOW;
@@ -101,6 +101,13 @@ pub fn demo_snapshot(state: AssistantState) -> SecretarySnapshot {
         current_tool: tool.map(str::to_string),
         task_summary: Some("デモ: 状態を順に表示".to_string()),
         pending_permission: (state == AssistantState::Waiting).then(|| "Bash".to_string()),
+        // 許可 / 拒否ボタンの見た目を確認できるように、中継された権限要求も付ける
+        relayed_permission: (state == AssistantState::Waiting).then(|| RelayedPermission {
+            request_id: "demo0".to_string(),
+            tool_name: "Bash".to_string(),
+            description: "テストを実行する".to_string(),
+            input_preview: "{\"command\":\"bun test\"}".to_string(),
+        }),
         session_id: Some("demo".to_string()),
         session_label: Some("demo".to_string()),
         tracked_sessions: 1,
@@ -153,5 +160,9 @@ mod tests {
         assert_eq!(waiting.status, AssistantState::Waiting);
         assert_eq!(waiting.pending_permission.as_deref(), Some("Bash"));
         assert_eq!(waiting.message_kind, Some(SpeechKind::Permission));
+        assert!(waiting.relayed_permission.is_some());
+        assert!(demo_snapshot(AssistantState::Working)
+            .relayed_permission
+            .is_none());
     }
 }

@@ -15,7 +15,7 @@
 - **対象OSはmacOS優先。** Windows対応は最終フェーズに置き、macOS固有の制約を設計に織り込む。
 - **キャラクターは1枚絵と手続き的な動きでMVPを作る。** 多フレームのスプライトは後回しにする。
 - **複数セッションと並列ツール呼び出しの扱いを定義**する。
-- **「話しかける」機能は後続フェーズ（Phase 10）として定義**し、プロトコルに逆方向メッセージを用意する。
+- **「話しかける」機能はPhase 10として定義**し、プロトコルに逆方向メッセージを用意する（2026-09-03 完了）。
 - **リポジトリは現在の単一Tauriアプリ構成を維持**する。モノレポ化はしない。
 
 ---
@@ -688,27 +688,45 @@ SpeechBubble
 
 ---
 
-## 14. Phase 10 ― 秘書からClaude Codeへの指示（後続）
+## 14. Phase 10 ― 秘書からClaude Codeへの指示
 
-MVPには含めないが、プロトコルに逆方向の型を確保しておく。
+**2026-09-03 完了。** 候補1（秘書アプリ自身をClaude Codeのchannelにする）で実装した。
 
-### 14.1 経路の候補
+### 14.1 調査で分かったこと
 
-1. **秘書アプリ自身をClaude Codeのchannelにする。** Discordプラグインと同じ仕組み（MCPサーバーの `claude/channel` capability）を秘書アプリが実装すれば、秘書からの入力が `<channel source="secretary">` としてセッションに届く。Claude Codeの設計に沿った正攻法。要調査
-2. Discordへ投稿する。Bot以外のアカウントで自動投稿するのは規約上不可なので採用しない
+- Claude Codeのchannelは「`capabilities.experimental["claude/channel"]` を宣言したstdio MCPサーバー」。サーバーが `notifications/claude/channel`（`content` と `meta`）を送ると、セッションに `<channel source="<サーバー名>" …>本文</channel>` のターンとして届く（`meta` の各キーがタグの属性になる）。Claudeが busy のときは次のターンまで溜まる。
+- `claude/channel/permission` も宣言すると、権限要求が `notifications/claude/channel/permission_request`（`request_id`, `tool_name`, `description`, `input_preview`）で中継され、`notifications/claude/channel/permission`（`request_id`, `behavior: allow|deny`）で答えられる。端末側のダイアログと並走し、先に届いた答えが採用される。
+- 研究プレビュー中は `--channels` にAnthropicの許可リスト上のプラグインしか渡せない。自作channelは `claude --dangerously-load-development-channels server:secretary` で読み込む（起動時に確認ダイアログが出る。`--help` には出ない）。
+- MCPサーバーの子プロセスには `CLAUDE_CODE_SESSION_ID` と `CLAUDE_PROJECT_DIR` が環境変数で渡される（実機で確認）。これでhookのsession_idとそのまま突き合わせられる。
+- Discordへの自動投稿（候補2）は採用しない。
 
-候補1を本命とし、Phase 0とは別に短い調査スパイクを設ける。
+### 14.2 構成
 
-### 14.2 プロトコル上の予約
-
-```rust
-#[derive(Serialize, Deserialize, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SecretaryCommand {
-    SendPrompt { session_id: String, text: String },
-    RespondPermission { session_id: String, request_id: String, allow: bool },
-}
+```text
+ 秘書アプリ ──ChannelCommand(SendPrompt / RespondPermission)──▶ secretary-channel ──MCP notification──▶ Claude Code
+ 秘書アプリ ◀──ChannelEvent(Hello / Reply / PermissionRequest)── secretary-channel ◀──MCP request/notif── Claude Code
 ```
+
+- `crates/secretary-channel`: Rust製のstdio MCPサーバー（依存はserdeのみ、MCPは手書き）。`scripts/install-channel.sh` でユーザースコープのMCPサーバー `secretary` として登録する。Claude Codeがセッションごとに起動し、アプリとは `~/Library/Application Support/com.nagatadaichi.tauriapp/channel.sock`（Unixソケット、0600、hookと同じトークンで認証）で1行1JSONを交換する。アプリが無ければ2秒ごとに再接続を試すだけで、MCPとしては普通に応答する。
+- 型は `secretary-core::channel`（`ChannelEvent` / `ChannelCommand` / `RelayedPermission`）。計画にあった `SecretaryCommand` はこの2つに置き換えた。
+- アプリ側は `src-tauri/src/channel.rs`（接続台帳とソケット）、`server::Core::send_prompt` / `respond_permission`。送り先は表示中のセッション、接続が無ければ最新の接続。`POST /say`、`POST /permission` でスクリプトからも送れる（`scripts/say.sh`, `scripts/permission.sh`）。
+- 追跡: `<channel source="secretary">` 由来のプロンプトと、秘書channelから中継された権限要求はDiscordと同じ「channel由来」として扱う（`FollowPolicy::Channel`、設定値は従来どおり `"discord"`）。`mcp__secretary__reply` はDiscordの返信ツールと同じReplyクラス。
+- UI: キャラクターに触れると出る💬ボタン、右クリックとトレイの「話しかける…」で入力欄を開く（Enterで送信、Escで閉じる）。中継された権限要求は吹き出しに説明と引数のプレビュー、「許可 / 拒否」ボタンを出す。入力欄やボタンが出ている間はウィンドウ全体でクリックを受ける。文言は `persona.toml` の `waiting_relayed`（`{tool}` は `secretary: reply` のように短くしたツール名）。
+
+### 14.3 実機確認（2026-09-03）
+
+`claude --dangerously-load-development-channels server:secretary --permission-mode default` で起動したセッションに対して:
+
+1. `scripts/say.sh "1たす1は？短く答えて"` → 端末に `← secretary: 1たす1は？短く答えて` と表示され、hookには `<channel source="secretary" chat_id="desktop" ts="…">` のUserPromptSubmitが届いた。
+2. Claudeが `reply` ツールを呼び、その実行許可が `permission_request`（id=xakdy）として秘書に中継された。吹き出しは「「secretary: reply」を実行してよいですか？下のボタンで答えてください。」。
+3. `scripts/permission.sh xakdy allow` → ツールが実行され、「2です。」が吹き出しに出て、Stopまで到達した。
+4. 別のターンで `deny` → Claudeは拒否を受けて文章で答え、Stopで片付いた（PermissionDeniedは届かなかった）。
+
+### 14.4 制約
+
+- 開発用フラグはセッションごとに指定が要る。`--channels` で使えるのはAnthropicの許可リストに載ってから。
+- MCPサーバーはユーザースコープなので、全セッションで `secretary-channel` が起動し `reply` ツールが見える（説明文で「秘書からのメッセージにだけ使う」と指示している）。外すときは `claude mcp remove -s user secretary`。
+- `reply` ツールの実行にも権限確認が出る設定では毎回中継される。煩わしければ `permissions.allow` に `mcp__secretary__reply` を足す。
 
 ---
 
@@ -874,7 +892,7 @@ MVP-2に到達した時点で、冒頭の最終コンセプトが最小構成で
 | `macos-private-api` の使用 | App Store配布不可 | 個人利用のため許容 |
 | Claude Code側のhook仕様変更 | 接続が壊れる | `secretary-hook` は未知フィールドを保持し、Coreは欠損に寛容にする |
 | 素材制作の工数 | UIの完成度 | 1枚絵と手続き的な動きで先に体験を作る |
-| Phase 10のchannel化は仕様が公開情報として十分でない | 逆方向機能の実現性 | 別スパイクで調査。実現できなくてもMVPには影響しない |
+| Phase 10のchannel化は仕様が公開情報として十分でない | 逆方向機能の実現性 | 2026-09-03 解消。公式のChannels referenceと実機で確認し、実装済み（14章） |
 
 ---
 

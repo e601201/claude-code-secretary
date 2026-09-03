@@ -124,7 +124,7 @@ Claude は Read ツールではなく Bash の `cat` で読むことがある（
 
 | 方針 | 対象 | 用途 |
 |---|---|---|
-| `Discord`（既定） | `discord_origin` が true のセッション | 本来の用途 |
+| `Channel`（既定、設定値は `"discord"`） | `channel_origin` が true のセッション。Discord か秘書 channel 由来のプロンプトを受け取ったか、秘書 channel から権限要求が中継されたもの | 本来の用途 |
 | `All` | 全セッション | 開発時、fake event の確認 |
 | `Session(id)` | 指定した 1 つ | トレイメニューからの手動固定 |
 
@@ -145,7 +145,8 @@ UI に渡す唯一の構造。`ts-rs` が `src/generated/SecretarySnapshot.ts` �
 | `message` / `message_kind` | 吹き出し文言と出所（reply / assistant / permission / system）。無ければ UI が状態テンプレートを使う |
 | `current_tool` | 実行中ツールの短い説明。Bash は `Bash: <コマンド先頭行 60 文字>`、ファイル系は `Edit: <path>` |
 | `task_summary` | 直近プロンプトの先頭行（120 文字まで） |
-| `pending_permission` | 許可待ちのツール名 |
+| `pending_permission` | 許可待ちのツール名（MCP ツールは `secretary: reply` のように短くする） |
+| `relayed_permission` | 秘書 channel 経由で中継された権限要求（`request_id`, `tool_name`, `description`, `input_preview`）。あれば UI が許可 / 拒否ボタンを出す。秘書が答えると許可待ちごと解け、接続が切れただけならボタンだけ消える（Phase 10） |
 | `session_id` / `session_label` | 表示中セッション。ラベルは cwd の末尾ディレクトリ名 |
 | `tracked_sessions` | 表示対象と認識しているセッション数 |
 
@@ -161,14 +162,14 @@ UI に渡す唯一の構造。`ts-rs` が `src/generated/SecretarySnapshot.ts` �
 | `error_hold` | 5 秒 | `HoldConfig` |
 | `max_message_chars` | 120 | `HoldConfig` |
 | `stale_after` | 30 分 | `TrackerConfig` |
-| `follow` | `Discord` | `TrackerConfig` |
+| `follow` | `Channel` | `TrackerConfig` |
 | `cwd_prefixes` | 空 | `TrackerConfig` |
 
 ---
 
 ## 8. 既知の限界と今後
 
-- 手動 Deny 時にどのイベントが届くかは未観測。現状は Stop での掃除に頼る。
+- 手動 Deny 時にどのイベントが届くかは未観測。現状は Stop での掃除に頼る。秘書 channel 経由の拒否では PermissionDenied は届かず、Stop で片付いた（2026-09-03 観測）。
 - 拒否だけで終わったターンは、失敗イベントが無いので success と表示される。
 - Bash の読み取り判定はヒューリスティック。`sed -n`（読み取り）は Working、`xargs rm`（書き込み）は先頭語 xargs が一覧に無いので Working。安全側に倒れているが、読み取りを working と誤ることはある。
 - `thinking` を「reading」と分けたくなったら、`ToolClass::Reading` を状態にも昇格させれば足りる。

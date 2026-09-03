@@ -67,12 +67,35 @@ bun run tauri dev              # アプリが 127.0.0.1:47831 で hook を受け
 
 Phase 0 のログサーバー `cargo run -p hook-logger` は同じポートを使うので、アプリと同時には起動しない。
 
+### 秘書から話しかける(Phase 10)
+
+秘書アプリ自身を Claude Code の channel にする。`secretary-channel`(stdio MCP サーバー)を Claude Code がセッションごとに起動し、アプリとは Unix ソケット `channel.sock` でつながる。
+
+```sh
+./scripts/install-channel.sh   # secretary-channel をビルドし、ユーザースコープの MCP サーバー "secretary" として登録(再実行可)
+claude --dangerously-load-development-channels server:secretary   # channel を有効にしてセッションを起動
+```
+
+研究プレビュー中は自作 channel を `--channels` に渡せないため、開発用フラグで読み込む。起動時の確認で「I am using this for local development」を選ぶ。
+
+キャラクターに触れると出る 💬、右クリックかトレイの「話しかける…」で入力欄が開く。Enter で送ると、そのセッションに `<channel source="secretary">` のターンとして届き、Claude は `reply` ツールで吹き出しに短く返事をする。送り先は表示中のセッション、無ければ最新の接続。権限確認が出たとき(`--permission-mode default` など)は吹き出しに内容と「許可 / 拒否」が出て、そこから答えられる。文言は `persona.toml` の `waiting_relayed`。
+
+ターミナルからも送れる。
+
+```sh
+./scripts/say.sh "テストを走らせて"            # POST /say
+./scripts/permission.sh <request_id> allow     # POST /permission。request_id はログの [channel] permission_request に出る
+```
+
+登録を外すには `claude mcp remove -s user secretary`。
+
 ## 構成
 
 ```text
 src/                    フロントエンド(TypeScript)。src/generated/ は Rust から生成した型
 src-tauri/              アプリ本体(Rust)
-crates/secretary-core/  状態機械。Tauri に依存しない
+crates/secretary-core/  状態機械と channel の型。Tauri に依存しない
+crates/secretary-channel/ 秘書を Claude Code の channel にする stdio MCP サーバー(Phase 10)
 crates/hook-logger/     Phase 0 用のログサーバー
 public/character/       キャラクター画像
 docs/                   企画書と仕様

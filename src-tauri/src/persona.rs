@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use secretary_core::{AssistantState, HookEvent, SecretarySnapshot, SpeechKind};
+use secretary_core::{display_tool_name, AssistantState, HookEvent, SecretarySnapshot, SpeechKind};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Runtime};
 
@@ -35,6 +35,8 @@ pub struct Phrases {
     pub error: Vec<String>,
     /// 許可待ちの言い換え。`{tool}` はツール名に置き換わる
     pub waiting: Vec<String>,
+    /// 秘書の吹き出しから許可 / 拒否を返せる許可待ち(channel 経由で中継されたもの)。`{tool}` はツール名
+    pub waiting_relayed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +67,10 @@ impl Default for Phrases {
             waiting: v(&[
                 "「{tool}」の実行に確認が必要です。Discordで承認をお願いします。",
                 "{tool} を実行してよいか、確認させてください。",
+            ]),
+            waiting_relayed: v(&[
+                "「{tool}」を実行してよいですか？下のボタンで答えてください。",
+                "{tool} の実行許可をお願いします。許可か拒否を選んでください。",
             ]),
         }
     }
@@ -113,6 +119,9 @@ impl PersonaConfig {
              # 許可待ちの言い換え。{{tool}} はツール名に置き換わる\n\
              waiting = [\n{waiting}\n]\n\
              \n\
+             # 秘書の吹き出しから許可 / 拒否を返せる許可待ち(秘書 channel 経由)。{{tool}} はツール名\n\
+             waiting_relayed = [\n{waiting_relayed}\n]\n\
+             \n\
              [timing]\n\
              long_work_after_secs = {long}\n",
             turn_start = list(&d.phrases.turn_start),
@@ -120,6 +129,7 @@ impl PersonaConfig {
             success = list(&d.phrases.success),
             error = list(&d.phrases.error),
             waiting = list(&d.phrases.waiting),
+            waiting_relayed = list(&d.phrases.waiting_relayed),
             long = d.timing.long_work_after_secs,
         )
     }
@@ -160,6 +170,7 @@ enum Trigger {
     Success,
     Error,
     Waiting,
+    WaitingRelayed,
 }
 
 /// 依存を増やさないための小さな乱数(xorshift64)。品質は問わない。
@@ -199,6 +210,7 @@ impl Chooser {
             Trigger::Success => &self.cfg.phrases.success,
             Trigger::Error => &self.cfg.phrases.error,
             Trigger::Waiting => &self.cfg.phrases.waiting,
+            Trigger::WaitingRelayed => &self.cfg.phrases.waiting_relayed,
         };
         if list.is_empty() {
             return None;
@@ -225,6 +237,8 @@ struct Mood {
     error_prefix: Option<String>,
     /// 許可待ちの言い換え(ツール名を埋め込み済み)
     waiting_text: Option<String>,
+    /// 中継された権限要求(request_id)とその言い換え。同じ要求の間は文言を変えない
+    relayed_text: Option<(String, String)>,
     /// 作業(thinking / working)が続いている開始時刻
     busy_since: Option<Instant>,
     /// このターンで「長引いている」を言ったか
@@ -277,7 +291,7 @@ impl Persona {
                 let phrase = self
                     .chooser
                     .pick(Trigger::Waiting)
-                    .map(|p| p.replace("{tool}", &tool.name));
+                    .map(|p| p.replace("{tool}", &display_tool_name(&tool.name)));
                 self.sessions
                     .entry(session.to_string())
                     .or_default()
@@ -320,9 +334,11 @@ impl Persona {
             return;
         };
         let long_after = self.long_work_after();
-        let Some(mood) = self.sessions.get_mut(&session) else {
-            return;
-        };
+        // hook より先に channel から権限要求が届くこともあるので、無ければ作る
+        let mood = self.sessions.entry(session).or_default();
+        if snapshot.relayed_permission.is_none() {
+            mood.relayed_text = None;
+        }
 
         // 長引いている作業への一言(ターンにつき一度)
         let busy = matches!(
@@ -350,7 +366,28 @@ impl Persona {
             (Some(_), Some(SpeechKind::Permission)) => {
                 // 許可待ちが出た時点で、それ以前の定型文は役目を終える
                 mood.current = None;
-                if let Some(text) = &mood.waiting_text {
+                if let Some(relayed) = snapshot.relayed_permission.clone() {
+                    // 秘書から答えられる要求は、ボタンを促す文言にする。同じ要求の間は固定
+                    let kept = mood
+                        .relayed_text
+                        .as_ref()
+                        .filter(|(id, _)| *id == relayed.request_id)
+                        .map(|(_, text)| text.clone());
+                    let text = kept.or_else(|| {
+                        let tool = display_tool_name(&relayed.tool_name);
+                        let picked = self
+                            .chooser
+                            .pick(Trigger::WaitingRelayed)
+                            .map(|p| p.replace("{tool}", &tool));
+                        if let Some(p) = &picked {
+                            mood.relayed_text = Some((relayed.request_id.clone(), p.clone()));
+                        }
+                        picked
+                    });
+                    if let Some(text) = text {
+                        snapshot.message = Some(text);
+                    }
+                } else if let Some(text) = &mood.waiting_text {
                     snapshot.message = Some(text.clone());
                 }
             }
@@ -388,6 +425,7 @@ mod tests {
             current_tool: None,
             task_summary: None,
             pending_permission: None,
+            relayed_permission: None,
             session_id: Some("s".into()),
             session_label: Some("app".into()),
             tracked_sessions: 1,
@@ -440,6 +478,54 @@ mod tests {
         );
         p.decorate(&mut snap, now);
         assert_eq!(snap.message.as_deref(), Some("直しました！"));
+    }
+
+    #[test]
+    fn relayed_permission_gets_its_own_phrase_and_keeps_it_while_pending() {
+        let mut p = Persona::new(PersonaConfig::default());
+        let now = Instant::now();
+        let relayed = secretary_core::RelayedPermission {
+            request_id: "abcde".into(),
+            tool_name: "mcp__secretary__reply".into(),
+            description: "d".into(),
+            input_preview: "{}".into(),
+        };
+        let mut snap = snapshot(
+            AssistantState::Waiting,
+            Some("secretary: reply の実行許可を待っています"),
+            Some(SpeechKind::Permission),
+        );
+        snap.relayed_permission = Some(relayed.clone());
+        p.decorate(&mut snap, now);
+        let first = snap.message.clone().unwrap();
+        assert!(first.contains("secretary: reply"), "{first}");
+        assert!(!first.contains("Discord"), "{first}");
+        assert!(!first.contains("{tool}"));
+        for _ in 0..5 {
+            let mut again = snapshot(
+                AssistantState::Waiting,
+                Some("secretary: reply の実行許可を待っています"),
+                Some(SpeechKind::Permission),
+            );
+            again.relayed_permission = Some(relayed.clone());
+            p.decorate(&mut again, now);
+            assert_eq!(
+                again.message.as_deref(),
+                Some(first.as_str()),
+                "同じ要求の間は固定"
+            );
+        }
+        // 答えた後(中継分が消えた)は元の文言に戻る。hook の言い換えは無いので原文のまま
+        let mut after = snapshot(
+            AssistantState::Waiting,
+            Some("secretary: reply の実行許可を待っています"),
+            Some(SpeechKind::Permission),
+        );
+        p.decorate(&mut after, now);
+        assert_eq!(
+            after.message.as_deref(),
+            Some("secretary: reply の実行許可を待っています")
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ function snap(over: Partial<SecretarySnapshot>): SecretarySnapshot {
     current_tool: null,
     task_summary: null,
     pending_permission: null,
+  relayed_permission: null,
     session_id: "s",
     session_label: "app",
     tracked_sessions: 1,

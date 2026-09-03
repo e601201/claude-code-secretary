@@ -411,3 +411,157 @@ body {
     transition: none !important;
   }
 }
+
+/* ===== Phase 10: 話しかける / 権限の中継 ===== */
+
+/* 吹き出しのボタン、入力欄、話しかけるボタンはクリックを受ける(親は pointer-events: none) */
+#bubble-actions button,
+#composer,
+#composer *,
+#talk-button {
+  pointer-events: auto;
+}
+
+/* 権限要求の内容(説明と引数のプレビュー) */
+#bubble-detail {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  opacity: 0.85;
+}
+
+#bubble-detail[hidden],
+#bubble-actions[hidden] {
+  display: none;
+}
+
+#bubble-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+#bubble-actions button {
+  flex: 1;
+  padding: 5px 0;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+#perm-allow {
+  background: #2e9e57;
+}
+
+#perm-deny {
+  background: #d9534f;
+}
+
+#bubble-actions button:hover {
+  filter: brightness(1.08);
+}
+
+#bubble-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ボタンを出している間は揺らさない(押しにくいので) */
+#bubble:has(#bubble-actions:not([hidden])).visible {
+  animation: none;
+}
+
+/* キャラクターの足元右の「話しかける」ボタン。触れている間だけ見える */
+#talk-button {
+  position: absolute;
+  right: 6px;
+  bottom: 8px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  font-size: 15px;
+  line-height: 30px;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+}
+
+#stage:hover #talk-button,
+#stage.composing #talk-button {
+  opacity: 1;
+}
+
+/* 入力欄。足元のパネルと同じ場所に出し、その間はパネルを隠す */
+#composer {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  width: 252px;
+  box-sizing: border-box;
+  padding: 5px 6px 5px 10px;
+  border-radius: 12px;
+  background: rgba(28, 30, 38, 0.92);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#composer[hidden] {
+  display: none;
+}
+
+#composer-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #f2f2f2;
+  font-size: 13px;
+  font-family: inherit;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+#composer-input::placeholder {
+  color: #9aa0ad;
+}
+
+#composer-input:disabled {
+  opacity: 0.6;
+}
+
+#composer-send {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: #4c7dff;
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+#stage.composing #panel {
+  opacity: 0;
+}

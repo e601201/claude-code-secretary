@@ -6,6 +6,7 @@
 //!
 //! 流れ: JSON → [`HookEnvelope`] → [`HookEvent`] → [`SessionState::apply`] → [`Tracker::snapshot`]
 
+pub mod channel;
 pub mod classify;
 pub mod hook;
 pub mod session;
@@ -13,8 +14,12 @@ pub mod snapshot;
 pub mod state;
 pub mod tracker;
 
-pub use classify::ToolClass;
-pub use hook::{split_channel_tag, HookEnvelope, HookEvent, PromptOrigin, ToolRef};
+pub use channel::{ChannelCommand, ChannelEvent, RelayedPermission};
+pub use classify::{display_tool_name, ToolClass};
+pub use hook::{
+    split_channel_tag, HookEnvelope, HookEvent, PromptOrigin, ToolRef, DISCORD_CHANNEL_SOURCE,
+    SECRETARY_CHANNEL_SOURCE,
+};
 pub use session::{HoldConfig, SessionState, Speech};
 pub use snapshot::{SecretarySnapshot, SpeechKind};
 pub use state::AssistantState;
