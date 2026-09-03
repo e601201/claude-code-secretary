@@ -4,8 +4,10 @@
 //! Dock には出さずメニューバーのトレイから操作する。ウィンドウ位置は再起動後も保つ。
 
 mod bridge;
+mod config;
+mod server;
 
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -15,6 +17,8 @@ use tauri::{
 };
 
 use bridge::SnapshotBridge;
+use secretary_core::{FollowPolicy, Tracker};
+use server::Core;
 
 /// `tauri.conf.json` の windows[].label と一致させる。
 pub const CHARACTER_WINDOW: &str = "character";
@@ -23,6 +27,7 @@ const TRAY_ID: &str = "main";
 const MENU_CLICK_THROUGH: &str = "click_through";
 const MENU_ALWAYS_ON_TOP: &str = "always_on_top";
 const MENU_QUIT: &str = "quit";
+const MENU_FOLLOW_ALL: &str = "follow_all";
 const MENU_DEMO_PLAY: &str = "demo_play";
 /// デバッグメニューの状態項目は `demo_state_<name>`。
 const MENU_DEMO_STATE_PREFIX: &str = "demo_state_";
@@ -210,12 +215,25 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let follow_all_initial = app
+        .try_state::<Arc<Core>>()
+        .map(|c| c.follow() == FollowPolicy::All)
+        .unwrap_or(false);
+    let follow_all = CheckMenuItem::with_id(
+        app,
+        MENU_FOLLOW_ALL,
+        "すべてのセッションを追跡",
+        true,
+        follow_all_initial,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "終了", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
             &click_through,
             &always_on_top,
+            &follow_all,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -245,7 +263,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             .map(|i| i as &dyn tauri::menu::IsMenuItem<R>)
             .collect();
         let debug = Submenu::with_items(app, "デバッグ", true, &refs)?;
-        menu.insert(&debug, 2)?;
+        menu.insert(&debug, 3)?;
     }
 
     // アイコン無しで作ると macOS では幅ゼロの項目になって見えないので、必ず埋め込み画像を使う。
@@ -276,6 +294,17 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     if let Err(e) = window.set_always_on_top(on) {
                         eprintln!("set_always_on_top failed: {e}");
                     }
+                }
+            }
+            MENU_FOLLOW_ALL => {
+                let all = follow_all.is_checked().unwrap_or(false);
+                if let Some(core) = app.try_state::<Arc<Core>>() {
+                    core.set_follow(if all {
+                        FollowPolicy::All
+                    } else {
+                        FollowPolicy::Discord
+                    });
+                    server::refresh(app, &core);
                 }
             }
             MENU_QUIT => {
@@ -315,8 +344,22 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // 設定と認証トークンを読み、Tracker を包む Core を用意する
+            let config = config::load_or_create(app.handle());
+            let token = config::load_or_create_token(app.handle())?;
+            let core = Arc::new(Core::new(Tracker::new(config.tracker_config()), token));
+            app.manage(core.clone());
+
             build_tray(app.handle())?;
             restore_and_show(app.handle())?;
+
+            // hook 受信サーバーと、一時状態の期限切れを反映する定期処理
+            tauri::async_runtime::spawn(server::serve(
+                app.handle().clone(),
+                core.clone(),
+                config.port,
+            ));
+            tauri::async_runtime::spawn(server::ticker(app.handle().clone(), core));
             bridge::start_demo_loop_if_requested(app.handle().clone());
             Ok(())
         })

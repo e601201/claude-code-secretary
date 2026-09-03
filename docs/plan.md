@@ -450,6 +450,15 @@ character.setState("working");
 
 ## 8. Phase 4 ― Secretary Core（Rust）と fake event
 
+**2026-09-03 完了。** 実装は `src-tauri/src/server.rs`（axumのHTTPサーバーと、Trackerを包む `Core`）、`src-tauri/src/config.rs`（`config.toml` と認証トークン）、`scripts/fake-turn.sh`。設計からの変更点:
+
+- `/debug/event` は作らず、`scripts/fake-turn.sh` が本物と同じ `/hook` へトークン付きで投げる。経路が一つで済む。
+- 一時状態の期限切れは、500ミリ秒ごとにスナップショットを計算し「前回配信と異なるときだけ」配信する定期処理で反映する。同じ処理が2分ごとに失効セッションも掃除する。
+- 追跡方針はトレイの「すべてのセッションを追跡」で実行中に切り替えられる。既定は設定ファイルの `follow`。
+- 設定ファイルとトークンは `~/Library/Application Support/com.nagatadaichi.tauriapp/` に置く。hookスクリプトは同じトークンファイルを読む。
+
+以下は着手前の計画。
+
 Claude Codeとの接続前に、Rust側の中核を作り、偽のイベントで一連の流れを通す。
 
 ### 8.1 構成
@@ -783,7 +792,7 @@ tauri-app/
 | 1 | 状態と遷移の設計 | 対応表と遷移規則の確定（完了。`docs/state-machine.md` と `crates/secretary-core`） |
 | 2 | Tauri最小アプリ | 透明なデスクトップキャラ（macOS）（完了） |
 | 3 | キャラクター表示と動き | 1枚絵が状態ごとに動く（完了） |
-| 4 | Secretary Core の配線と fake event | HTTP サーバーと Tauri への接続。偽イベントで一連の遷移が動く |
+| 4 | Secretary Core の配線と fake event | HTTP サーバーと Tauri への接続。偽イベントで一連の遷移が動く（完了） |
 | 5 | Claude Code接続 | 実際の作業に秘書が反応する |
 | 6 | 吹き出し | Claudeの発言が秘書の言葉になる |
 | 7 | ステータスパネル | タスクを可視化 |

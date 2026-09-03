@@ -40,12 +40,25 @@ SECRETARY_DEMO=1 bun run tauri dev
 cargo test -p secretary-core   # 状態機械のユニットテストと実ログの再生テスト
 ```
 
-## Claude Code との接続(Phase 0 の検証用)
+## Claude Code との接続
 
 ```sh
-cargo run -p hook-logger       # hook を受けてログに残すだけのサーバー
-./scripts/install-hooks.sh     # ~/.claude/settings.json に hook を登録(バックアップ付き)
+./scripts/install-hooks.sh     # ~/.claude/settings.json に hook を登録(バックアップ付き、再実行可)
+bun run tauri dev              # アプリが 127.0.0.1:47831 で hook を受け付ける
 ```
+
+アプリは起動時に `~/Library/Application Support/com.nagatadaichi.tauriapp/` へ `config.toml`(設定)と `token`(hook の認証トークン)を書く。hook スクリプトは同じトークンを読んで `Authorization: Bearer` で送る。設定を変えたらアプリを再起動する。
+
+既定では Discord 由来のセッションだけを表示する。ターミナルで動かしている Claude Code にも反応させたいときは、メニューバーの「すべてのセッションを追跡」をオンにするか、`config.toml` の `follow` を `"all"` にする。
+
+偽のイベントで一連の状態遷移を確かめるには次を実行する。
+
+```sh
+./scripts/fake-turn.sh          # thinking → working → waiting → success
+./scripts/fake-turn.sh --fail   # 途中でコマンドが失敗するターン
+```
+
+Phase 0 のログサーバー `cargo run -p hook-logger` は同じポートを使うので、アプリと同時には起動しない。
 
 ## 構成
 

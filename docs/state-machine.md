@@ -96,7 +96,7 @@ Claude は Read ツールではなく Bash の `cat` で読むことがある（
 | SessionEnd | `ended` にする。Tracker が削除する |
 | UserPromptSubmit | `in_turn = true`。`in_flight`、`waiting`、`transient`、`speech`、失敗フラグをすべてクリア。プロンプトが `<channel source="plugin:discord:discord"` で始まれば `discord_origin = true`。タグを剥がした本文の先頭行を `task_summary` にする |
 | PreToolUse | `in_turn = true`。`waiting` と `transient` をクリア。分類して `in_flight` に追加。Reply なら `tool_input.text` を `speech`（Reply）にし `turn_has_reply = true` |
-| PostToolUse | `tool_use_id`（無ければツール名の後方一致）で `in_flight` から除去。`waiting` をクリア |
+| PostToolUse | `tool_use_id`（無ければツール名の後方一致）で `in_flight` から除去。`waiting` をクリア（権限要求の文言も消す） |
 | PostToolUseFailure | 除去。`waiting` クリア。`turn_had_failure = true`。`transient = error`（5 秒）。`speech` を「{tool} が失敗しました: {error 先頭行}」（System）にする |
 | PermissionRequest | `waiting = tool_name`。`speech` を「{tool} の実行許可を待っています」（Permission）にする |
 | PermissionDenied | 除去。`waiting` クリア。error にはしない。auto mode でしか発火しない |
@@ -112,6 +112,7 @@ Claude は Read ツールではなく Bash の `cat` で読むことがある（
 - **拒否は error にしない。** 拒否は Claude の失敗ではない。
 - **Discord 返信本文を `last_assistant_message` より優先する。** Discord 由来ターンの `last_assistant_message` は「Discord への返信を送信しました…」という作業報告で、ユーザーに見せた言葉ではない（観測済み）。
 - **PermissionRequest には `tool_use_id` が無い。** ツール名で扱う。
+- **許可待ちが解消したら権限要求の文言は消す。** 用済みの「実行許可を待っています」が次の発言まで残らないようにする（PreToolUse / PostToolUse / PostToolUseFailure / PermissionDenied / Stop で解除）。
 
 ---
 

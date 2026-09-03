@@ -194,7 +194,7 @@ impl SessionState {
             }
             HookEvent::PreToolUse { tool } => {
                 self.in_turn = true;
-                self.waiting = None;
+                self.clear_waiting();
                 self.transient = None;
                 let class = classify(&tool.name, &tool.input);
                 if class == ToolClass::Reply {
@@ -212,11 +212,11 @@ impl SessionState {
             }
             HookEvent::PostToolUse { tool } => {
                 self.remove_in_flight(tool);
-                self.waiting = None;
+                self.clear_waiting();
             }
             HookEvent::PostToolUseFailure { tool, error, .. } => {
                 self.remove_in_flight(tool);
-                self.waiting = None;
+                self.clear_waiting();
                 self.turn_had_failure = true;
                 self.transient = Some(Transient {
                     state: AssistantState::Error,
@@ -240,7 +240,7 @@ impl SessionState {
             }
             HookEvent::PermissionDenied { tool, .. } => {
                 self.remove_in_flight(tool);
-                self.waiting = None;
+                self.clear_waiting();
             }
             HookEvent::Notification {
                 notification_type,
@@ -264,7 +264,7 @@ impl SessionState {
             } => {
                 self.in_turn = false;
                 self.in_flight.clear();
-                self.waiting = None;
+                self.clear_waiting();
                 self.transient = if self.turn_had_failure {
                     None
                 } else {
@@ -285,7 +285,7 @@ impl SessionState {
             HookEvent::StopFailure { error, .. } => {
                 self.in_turn = false;
                 self.in_flight.clear();
-                self.waiting = None;
+                self.clear_waiting();
                 self.turn_had_failure = true;
                 self.transient = Some(Transient {
                     state: AssistantState::Error,
@@ -299,6 +299,14 @@ impl SessionState {
                 );
             }
             HookEvent::Other(_) => {}
+        }
+    }
+
+    /// 許可待ちを解除する。権限要求の文言は用済みなので一緒に消す。
+    fn clear_waiting(&mut self) {
+        self.waiting = None;
+        if self.speech.as_ref().map(|s| s.kind) == Some(SpeechKind::Permission) {
+            self.speech = None;
         }
     }
 
@@ -483,6 +491,32 @@ mod tests {
         assert_eq!(h.s.speech().unwrap().kind, SpeechKind::Permission);
         assert_eq!(h.apply(post("Bash", "a")), AssistantState::Thinking);
         assert_eq!(h.s.pending_permission(), None);
+        // 許可待ちの文言は解消と同時に消える
+        assert!(h.s.speech().is_none());
+    }
+
+    #[test]
+    fn resolving_permission_keeps_non_permission_speech() {
+        let mut h = Harness::new();
+        h.apply(prompt("作って"));
+        h.apply(pre(
+            "mcp__plugin_discord_discord__reply",
+            "r",
+            json!({"chat_id": "1", "text": "やります"}),
+        ));
+        h.apply(post("mcp__plugin_discord_discord__reply", "r"));
+        h.apply(pre("Bash", "a", json!({"command": "touch /tmp/x"})));
+        h.apply(HookEvent::PermissionRequest {
+            tool: ToolRef {
+                name: "Bash".into(),
+                use_id: None,
+                input: json!({}),
+            },
+        });
+        assert_eq!(h.s.speech().unwrap().kind, SpeechKind::Permission);
+        h.apply(post("Bash", "a"));
+        // 権限文言は消えるが、返信文言は戻らない(上書き済み)。次の発言まで空
+        assert!(h.s.speech().is_none());
     }
 
     #[test]
