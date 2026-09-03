@@ -26,3 +26,6 @@ dist-ssr
 # Cargo workspace / spike logs
 /target
 /logs
+
+# Image
+/public/character

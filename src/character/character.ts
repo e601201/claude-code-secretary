@@ -23,7 +23,7 @@ const BADGES: Record<AssistantState, string> = {
 };
 
 const BASE_IMAGE = "/character/base.png";
-const PLACEHOLDER_IMAGE = "/character/placeholder.svg";
+const PLACEHOLDER_IMAGE = "/character/placeholder.png";
 
 /** 画像 URL が実際に画像として読めるか(存在しない場合は dev サーバーが HTML を返すので decode で落ちる) */
 function probeImage(url: string): Promise<boolean> {
