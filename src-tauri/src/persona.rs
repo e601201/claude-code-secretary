@@ -348,18 +348,24 @@ impl Persona {
                 }
             }
             (Some(_), Some(SpeechKind::Permission)) => {
+                // 許可待ちが出た時点で、それ以前の定型文は役目を終える
+                mood.current = None;
                 if let Some(text) = &mood.waiting_text {
                     snapshot.message = Some(text.clone());
                 }
             }
             (Some(original), Some(SpeechKind::System)) => {
+                mood.current = None;
                 if let Some(prefix) = &mood.error_prefix {
                     if !original.starts_with(prefix.as_str()) {
                         snapshot.message = Some(format!("{prefix}\n{original}"));
                     }
                 }
             }
-            _ => {}
+            (Some(_), _) => {
+                // Claude 自身の言葉が出たら、それ以前の定型文は蒸し返さない
+                mood.current = None;
+            }
         }
     }
 }
@@ -576,6 +582,34 @@ mod tests {
         );
         p.decorate(&mut snap, now);
         assert_eq!(snap.message.as_deref(), Some("終わりました"));
+    }
+
+    #[test]
+    fn persona_phrase_does_not_resurface_after_claude_or_permission_speech() {
+        let mut p = Persona::new(PersonaConfig::default());
+        let now = Instant::now();
+        p.on_event("s", &prompt(), now);
+        p.on_event(
+            "s",
+            &HookEvent::PermissionRequest {
+                tool: ToolRef {
+                    name: "Bash".into(),
+                    use_id: None,
+                    input: json!({}),
+                },
+            },
+            now,
+        );
+        let mut snap = snapshot(
+            AssistantState::Waiting,
+            Some("Bash の実行許可を待っています"),
+            Some(SpeechKind::Permission),
+        );
+        p.decorate(&mut snap, now);
+        // 許可待ちが解消されて文言が空に戻っても、ターン開始の一言は戻ってこない
+        let mut snap = snapshot(AssistantState::Thinking, None, None);
+        p.decorate(&mut snap, now);
+        assert_eq!(snap.message, None);
     }
 
     #[test]
