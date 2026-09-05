@@ -29,3 +29,8 @@ dist-ssr
 
 # Image
 /public/character
+
+# Agent skills (npx skills add) — 実体と各エージェント向けリンク
+/.agents/
+/.claude/skills/
+/.claude/settings.local.json
