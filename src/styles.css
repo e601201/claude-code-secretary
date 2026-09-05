@@ -106,6 +106,14 @@ body {
   white-space: pre-line;
 }
 
+/* 切れているときだけ、末尾を薄れさせて「続きがある」ことを示す。
+   マスクなので兄弟要素(#bubble-detail など)の位置に左右されない。
+   判定は bubble.ts の isClipped が行い、#bubble に .clipped を付ける */
+#bubble.clipped #bubble-text {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent 100%);
+}
+
 #bubble[data-kind="assistant"] {
   color: #2a3140;
 }

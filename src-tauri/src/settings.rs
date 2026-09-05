@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 use ts_rs::TS;
 
 use crate::{
@@ -33,13 +33,7 @@ pub struct SettingsInfo {
 
 /// 設定ウィンドウを出す(閉じても隠すだけなので、何度でも出せる)。
 pub fn open_settings_window<R: Runtime>(app: &AppHandle<R>) {
-    let Some(window) = app.get_webview_window(SETTINGS_WINDOW) else {
-        eprintln!("[settings] window not found");
-        return;
-    };
-    if let Err(e) = window.show().and_then(|_| window.set_focus()) {
-        eprintln!("[settings] show failed: {e}");
-    }
+    crate::show_window(app, SETTINGS_WINDOW);
 }
 
 fn autostart_available() -> bool {

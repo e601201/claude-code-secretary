@@ -9,6 +9,7 @@ use crate::classify::{classify, display_tool_name, reply_text, ToolClass};
 use crate::hook::{split_channel_tag, HookEvent, ToolRef};
 use crate::snapshot::SpeechKind;
 use crate::state::AssistantState;
+use crate::text::strip_markdown;
 
 /// 一時状態の保持時間などの設定。
 #[derive(Debug, Clone)]
@@ -381,9 +382,19 @@ impl SessionState {
         }
     }
 
+    /// 表示に載せる文言を決める。
+    ///
+    /// モデルが書いた文(`Reply` / `Assistant`)にだけ markdown が混ざるので、そこだけ記号を落とす。
+    /// エラー文やテンプレートは機械が書くもので markdown ではないため、削るとかえって壊れる
+    /// (`rm a*b*c` が `rm abc` になるなど)。文字数の上限は「見えている文字」に対して効かせる。
     fn set_speech(&mut self, text: String, kind: SpeechKind, cfg: &HoldConfig) {
+        let trimmed = text.trim();
+        let shown = match kind {
+            SpeechKind::Reply | SpeechKind::Assistant => strip_markdown(trimmed),
+            SpeechKind::Permission | SpeechKind::System => trimmed.to_string(),
+        };
         self.speech = Some(Speech {
-            text: truncate_chars(text.trim(), cfg.max_message_chars),
+            text: truncate_chars(shown.trim(), cfg.max_message_chars),
             kind,
         });
     }
@@ -724,5 +735,42 @@ mod tests {
         h.apply(prompt("a"));
         h.apply(stop("あいうえおかきくけこ"));
         assert_eq!(h.s.speech().unwrap().text, "あいうえ…");
+    }
+
+    #[test]
+    fn markdown_is_stripped_before_display() {
+        let mut h = Harness::new();
+        h.apply(prompt("a"));
+        h.apply(stop("**送った内容**\nREADME は `x.md` です"));
+        assert_eq!(
+            h.s.speech().unwrap().text,
+            "送った内容\nREADME は x.md です"
+        );
+    }
+
+    #[test]
+    fn machine_written_text_keeps_its_symbols() {
+        // エラー文はモデルではなく機械が書く。markdown ではないので削ると壊れる
+        let mut h = Harness::new();
+        h.apply(prompt("a"));
+        h.apply(HookEvent::PostToolUseFailure {
+            tool: tool("Bash", "1", json!({})),
+            error: "rm a*b*c failed".into(),
+            is_interrupt: false,
+        });
+        assert_eq!(
+            h.s.speech().unwrap().text,
+            "Bash が失敗しました: rm a*b*c failed"
+        );
+    }
+
+    #[test]
+    fn truncation_counts_the_stripped_length() {
+        // 記号を数えてしまうと、見えている文字が max より手前で切れる
+        let mut h = Harness::new();
+        h.cfg.max_message_chars = 5;
+        h.apply(prompt("a"));
+        h.apply(stop("**あいうえお**"));
+        assert_eq!(h.s.speech().unwrap().text, "あいうえお");
     }
 }

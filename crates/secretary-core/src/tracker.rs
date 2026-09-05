@@ -168,6 +168,14 @@ impl Tracker {
             .unwrap_or(false)
     }
 
+    /// 指定したセッションが追跡対象か。
+    ///
+    /// 全文ビューは「吹き出しに映り得たもの」だけを控える。`Core` は全セッションの
+    /// hook を見てしまうので、控える前にここで絞る。
+    pub fn is_session_followed(&self, id: &str) -> bool {
+        self.sessions.get(id).is_some_and(|s| self.is_followed(s))
+    }
+
     /// 表示対象のセッション一覧。
     pub fn followed(&self) -> Vec<&SessionState> {
         self.sessions
@@ -351,6 +359,26 @@ mod tests {
         let snap = t.snapshot(now);
         assert_eq!(snap.message.as_deref(), Some("やりました"));
         assert_eq!(snap.message_kind, Some(crate::SpeechKind::Reply));
+    }
+
+    #[test]
+    fn is_session_followed_respects_the_policy() {
+        let mut t = Tracker::new(TrackerConfig::default()); // 既定は Channel
+        let now = Instant::now();
+        // ターミナルで直接動かしただけのセッションは追跡対象にならない
+        t.apply(
+            &env("plain", "/a", "UserPromptSubmit", json!({"prompt": "x"})),
+            now,
+        );
+        assert!(!t.is_session_followed("plain"));
+        // channel 由来のプロンプトを受けたセッションは追跡対象
+        t.apply(
+            &env("ch", "/b", "UserPromptSubmit", json!({"prompt": DISCORD})),
+            now,
+        );
+        assert!(t.is_session_followed("ch"));
+        // 知らないセッションは対象外
+        assert!(!t.is_session_followed("nope"));
     }
 
     #[test]

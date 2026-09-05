@@ -12,6 +12,7 @@ pub mod hook;
 pub mod session;
 pub mod snapshot;
 pub mod state;
+pub mod text;
 pub mod tracker;
 
 pub use channel::{ChannelCommand, ChannelEvent, RelayedPermission};
@@ -23,4 +24,5 @@ pub use hook::{
 pub use session::{HoldConfig, SessionState, Speech};
 pub use snapshot::{SecretarySnapshot, SpeechKind};
 pub use state::AssistantState;
+pub use text::strip_markdown;
 pub use tracker::{FollowPolicy, Tracker, TrackerConfig};

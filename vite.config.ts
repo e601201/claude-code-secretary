@@ -10,12 +10,13 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // キャラクターと設定画面の 2 ページ
+  // キャラクター・設定画面・全文ビューの 3 ページ
   build: {
     rollupOptions: {
       input: {
         main: "index.html",
         settings: "settings.html",
+        fulltext: "fulltext.html",
       },
     },
   },
