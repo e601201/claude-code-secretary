@@ -405,7 +405,7 @@ Dockにアイコンが出ず、メニューバーにアイコンが出る
 
 ## 7. Phase 3 ― キャラクター表示と動き
 
-**2026-09-03 完了。** 実装は `src/character/character.ts` と `src/styles.css`、Rust側は `src-tauri/src/bridge.rs`。Rust が `secretary://snapshot` イベントで `SecretarySnapshot` を流し、フロントは `data-state` 属性とバッジを切り替えるだけ。動きはすべてCSSアニメーション。状態ごとの差分画像は `public/character/<state>.png` があれば自動で使う。デバッグ用にトレイの「デバッグ」サブメニューと `SECRETARY_DEMO=1` の巡回デモを用意した。
+**2026-09-03 完了。** 実装は `src/character/character.ts` と `src/styles.css`、Rust側は `src-tauri/src/bridge.rs`。Rust が `secretary://snapshot` イベントで `SecretarySnapshot` を流し、フロントは `data-state` 属性とバッジを切り替えるだけ。動きはすべてCSSアニメーション。状態ごとの差分画像は `public/character/<state>.png` があれば自動で使う。**(issue #2 で置き換え済み: 立ち絵は設定フォルダの `character.png` 1 枚をコマ送りする。`docs/character-sheet.md` を参照)**デバッグ用にトレイの「デバッグ」サブメニューと `SECRETARY_DEMO=1` の巡回デモを用意した。
 
 ### 7.1 方針
 

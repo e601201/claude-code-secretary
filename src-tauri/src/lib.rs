@@ -11,6 +11,7 @@ mod notify;
 mod persona;
 mod server;
 mod settings;
+mod sprite;
 
 use std::{
     fs,
@@ -722,7 +723,9 @@ pub fn run() {
             settings::save_config,
             settings::set_autostart,
             settings::open_path,
-            settings::reload_persona
+            settings::reload_persona,
+            sprite::sheet_status,
+            sprite::reload_sheet
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

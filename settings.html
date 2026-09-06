@@ -19,6 +19,15 @@
       </section>
 
       <section>
+        <h2>立ち絵</h2>
+        <div class="files">
+          <div class="file"><code id="sheet-path"></code><button type="button" id="reload-sheet">読み直す</button></div>
+        </div>
+        <p id="sheet-state" class="hint"></p>
+        <p class="hint">6 行(idle / thinking / working / waiting / success / error)× 4 コマ。1 コマは 3:4、推奨 480×640。書き方は <code>docs/character-sheet.md</code>。</p>
+      </section>
+
+      <section>
         <h2>追跡するセッション</h2>
         <label class="row"><input type="radio" name="follow-mode" value="discord" /> Discord か秘書から話しかけたセッションだけ</label>
         <label class="row"><input type="radio" name="follow-mode" value="all" /> すべてのセッション</label>

@@ -13,6 +13,7 @@ use crate::{
     config::{self, AppConfig},
     persona,
     server::{self, Core},
+    sprite::{self, SheetStatus},
 };
 
 /// `tauri.conf.json` の windows[].label と一致させる。
@@ -25,6 +26,8 @@ pub struct SettingsInfo {
     pub config: AppConfig,
     pub config_path: String,
     pub persona_path: String,
+    /// 立ち絵のシートが使える状態か。使えない理由もここに入る
+    pub sheet: SheetStatus,
     /// ログイン時の自動起動が有効か
     pub autostart_enabled: bool,
     /// 開発版(`tauri dev`)の実行ファイルはビルド版の場所に無いので、自動起動は登録しない
@@ -57,6 +60,7 @@ pub fn settings_info(app: AppHandle, core: tauri::State<'_, Arc<Core>>) -> Setti
         config: core.config(),
         config_path: path(config::CONFIG_FILENAME),
         persona_path: path(persona::PERSONA_FILENAME),
+        sheet: sprite::status(&app),
         autostart_enabled: autostart_enabled(&app),
         autostart_available: autostart_available(),
     }

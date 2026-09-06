@@ -1,16 +1,20 @@
-// キャラクターの表示と動き。状態名を受け取り、画像・バッジ・CSS アニメーションを切り替える。
-// 動き自体は styles.css の `#stage[data-state=...]` に書いてある。
+// 立ち絵の表示。状態を受け取り、シートの行を選び、コマ送りの速さと回数を決める。
+// コマを送るのは styles.css の #character(steps() の CSS アニメーション)で、
+// ここが渡すのは「どの行を」「どれくらいの速さで」「何周するか」の 3 つだけ。
+
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 import type { AssistantState } from "../generated/AssistantState";
-
-export const ALL_STATES: readonly AssistantState[] = [
-  "idle",
-  "thinking",
-  "working",
-  "waiting",
-  "success",
-  "error",
-];
+import type { SheetStatus } from "../generated/SheetStatus";
+import {
+  containSize,
+  cycleSeconds,
+  frameSize,
+  MOTIONS,
+  PLACEHOLDER_URL,
+  rowPosition,
+  sheetUrl,
+} from "./sheet";
 
 /** 頭上に出す状態バッジ。idle は何も出さない */
 const BADGES: Record<AssistantState, string> = {
@@ -22,54 +26,43 @@ const BADGES: Record<AssistantState, string> = {
   error: "⚠️",
 };
 
-const BASE_IMAGE = "/character/base.png";
-const PLACEHOLDER_IMAGE = "/character/placeholder.png";
-
-/** 画像 URL が実際に画像として読めるか(存在しない場合は dev サーバーが HTML を返すので decode で落ちる) */
-function probeImage(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve(img.naturalWidth > 0);
-    img.onerror = () => resolve(false);
-    img.src = url;
-  });
+/** Tauri の外(素のブラウザ)で開いたときは、プレースホルダーだけで動かす */
+function assetUrl(path: string): string {
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return PLACEHOLDER_URL;
+  }
 }
 
 export class Character {
   private state: AssistantState = "idle";
-  private baseSrc = PLACEHOLDER_IMAGE;
-  /** 状態ごとの差分画像(public/character/<state>.png)。無ければ base を使う */
-  private variants = new Map<AssistantState, string>();
 
   constructor(
     private readonly stage: HTMLElement,
-    private readonly img: HTMLImageElement,
+    /** 背景としてシートを持つ要素(#character) */
+    private readonly figure: HTMLElement,
     private readonly badge: HTMLElement,
     private readonly log: (message: string) => void = () => {},
   ) {}
 
-  /** 画像を解決して表示する。差分画像の探索は表示をブロックしない */
-  async mount(): Promise<void> {
-    this.baseSrc = (await probeImage(BASE_IMAGE)) ? BASE_IMAGE : PLACEHOLDER_IMAGE;
-    this.img.src = this.baseSrc;
-    this.log(`character base: ${this.baseSrc}`);
+  /**
+   * 立ち絵を差し替える。使えるシートが無ければアプリ同梱のプレースホルダーで動かす
+   * (判定は Rust 側の sprite.rs が済ませてある)。
+   */
+  setSheet(status: SheetStatus | null): void {
+    const url = sheetUrl(status, assetUrl);
+    // 背景は枠いっぱいに引き伸ばされるので、枠のほうを 1 コマの縦横比に合わせる
+    const size = containSize(frameSize(status));
+    this.figure.style.setProperty("--sheet", `url("${url}")`);
+    this.figure.style.width = `${size.width}px`;
+    this.figure.style.height = `${size.height}px`;
+    this.log(
+      status?.usable
+        ? `sheet: ${status.path} (1 コマ ${status.frame_width}x${status.frame_height})`
+        : `sheet: placeholder (${status?.reason ?? "まだ取得していません"})`,
+    );
     this.applyVisual();
-
-    void Promise.all(
-      ALL_STATES.filter((s) => s !== "idle").map(async (s) => {
-        const url = `/character/${s}.png`;
-        if (await probeImage(url)) this.variants.set(s, url);
-      }),
-    ).then(() => {
-      if (this.variants.size > 0) {
-        this.log(`character variants: ${[...this.variants.keys()].join(", ")}`);
-        this.applyVisual();
-      }
-    });
-  }
-
-  current(): AssistantState {
-    return this.state;
   }
 
   setState(state: AssistantState): void {
@@ -81,7 +74,18 @@ export class Character {
   private applyVisual(): void {
     this.stage.dataset.state = this.state;
     this.badge.textContent = BADGES[this.state];
-    const src = this.variants.get(this.state) ?? this.baseSrc;
-    if (!this.img.src.endsWith(src)) this.img.src = src;
+
+    const motion = MOTIONS[this.state];
+    const style = this.figure.style;
+    style.setProperty("--row", `${rowPosition(motion.row)}%`);
+    style.setProperty("--cycle", `${cycleSeconds(motion)}s`);
+    // 一時状態(success / error)は 1 周で止まり、最終コマのまま残る
+    style.setProperty("--iterations", motion.loop ? "infinite" : "1");
+
+    // 状態が変わったらコマ位置を 1 コマ目に戻す。CSS 変数を書き換えるだけでは
+    // 走っているアニメーションは巻き戻らないので、いったん外して掛け直す。
+    style.animationName = "none";
+    void this.figure.offsetWidth;
+    style.animationName = "";
   }
 }

@@ -56,7 +56,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCONFIG/character.png"]
+      }
     }
   },
   "bundle": {

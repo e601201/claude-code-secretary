@@ -196,6 +196,15 @@ footer {
   color: #d9534f;
 }
 
+/* 立ち絵の状態。素材がまだ無いのは異常ではないので、赤にはしない */
+#sheet-state[data-kind="ok"] {
+  color: #2e9e57;
+}
+
+#sheet-state[data-kind="fallback"] {
+  color: #b8860b;
+}
+
 #save {
   background: #4c7dff;
   border-color: #4c7dff;
