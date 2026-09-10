@@ -45,11 +45,17 @@ bun run tauri build   # target/release/bundle/macos/tauri-app.app ができる
 
 `persona.toml` を編集すると吹き出しの定型文を差し替えられる。指示を受けたとき(`turn_start`)、作業が長引いたとき(`long_work`)、成功(`success`)、失敗の前置き(`error`)、許可待ちの言い換え(`waiting`、`{tool}` がツール名になる)の 5 種類で、各項目は候補の配列。Claude が Discord に返した本文や最終応答があるときはそちらが優先され、定型文は文言が無いときだけ使われる。
 
-## キャラクター画像
+## 立ち絵
 
-`public/character/base.png` に透過 PNG を置くと、その画像が表示される。推奨サイズは 240×320 程度(ウィンドウと同じ比率)。無い場合は `public/character/placeholder.svg` の仮キャラクターが出る。
+立ち絵は自分で用意する。設定フォルダに `character.png` を 1 枚置くと、それが秘書の姿になる。
 
-状態ごとの差分画像は任意。`public/character/<state>.png`(例: `success.png`、`error.png`)を置くと、その状態のときだけ差し替わる。動き(呼吸、首かしげ、跳躍、震え)とバッジは 1 枚絵のままでも付く。
+```
+~/Library/Application Support/com.nagatadaichi.tauriapp/character.png
+```
+
+6 行(idle / thinking / working / waiting / success / error)× 4 コマのシート。1 コマは 3:4、推奨は 480×640(シート全体で 1920×3840)。書き方は [docs/character-sheet.md](docs/character-sheet.md)。
+
+置いていない・寸法が合わないときは、同梱のプレースホルダーで動く。落ちている理由は設定ウィンドウの「立ち絵」に出る。差し替えたら同じところの「読み直す」を押す(アプリの再起動は要らない)。
 
 ## テスト
 
@@ -108,6 +114,6 @@ src-tauri/              アプリ本体(Rust)
 crates/secretary-core/  状態機械と channel の型。Tauri に依存しない
 crates/secretary-channel/ 秘書を Claude Code の channel にする stdio MCP サーバー(Phase 10)
 crates/hook-logger/     Phase 0 用のログサーバー
-public/character/       キャラクター画像
+public/                 静的ファイル。placeholder.png は立ち絵の仮の姿
 docs/                   企画書と仕様
 ```

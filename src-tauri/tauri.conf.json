@@ -31,6 +31,18 @@
         "visible": false
       },
       {
+        "label": "fulltext",
+        "title": "発言の全文",
+        "url": "fulltext.html",
+        "width": 520,
+        "height": 560,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "visible": false,
+        "center": true
+      },
+      {
         "label": "settings",
         "title": "秘書の設定",
         "url": "settings.html",
@@ -44,7 +56,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPCONFIG/character.png"]
+      }
     }
   },
   "bundle": {

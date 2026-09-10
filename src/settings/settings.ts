@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { AppConfig } from "../generated/AppConfig";
 import type { SettingsInfo } from "../generated/SettingsInfo";
+import type { SheetStatus } from "../generated/SheetStatus";
 import { formatScale, joinFollow, parsePrefixes, splitFollow, type FollowMode } from "./form";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -32,6 +33,8 @@ async function main(): Promise<void> {
   const errorHold = byId<HTMLInputElement>("error-hold");
   const stale = byId<HTMLInputElement>("stale");
   const maxChars = byId<HTMLInputElement>("max-chars");
+  const sheetPath = byId<HTMLElement>("sheet-path");
+  const sheetState = byId<HTMLElement>("sheet-state");
   const configPath = byId<HTMLElement>("config-path");
   const personaPath = byId<HTMLElement>("persona-path");
   const status = byId<HTMLElement>("status");
@@ -45,6 +48,19 @@ async function main(): Promise<void> {
   const setStatus = (text: string, kind: "ok" | "error" | "" = ""): void => {
     status.textContent = text;
     status.dataset.kind = kind;
+  };
+
+  /** 立ち絵の状態。使えないときは、落ちていることと理由の両方を出す(黙って落とさない) */
+  const fillSheet = (sheet: SheetStatus): void => {
+    sheetPath.textContent = sheet.path;
+    if (sheet.usable) {
+      sheetState.textContent = `使っています(${sheet.width}×${sheet.height}、1 コマ ${sheet.frame_width}×${sheet.frame_height})`;
+      sheetState.dataset.kind = "ok";
+      return;
+    }
+    const size = sheet.width && sheet.height ? `(${sheet.width}×${sheet.height})` : "";
+    sheetState.textContent = `プレースホルダーで表示しています — ${sheet.reason ?? "読めません"}${size}`;
+    sheetState.dataset.kind = "fallback";
   };
 
   const fill = (info: SettingsInfo): void => {
@@ -67,6 +83,7 @@ async function main(): Promise<void> {
     maxChars.value = String(c.max_message_chars);
     configPath.textContent = info.config_path;
     personaPath.textContent = info.persona_path;
+    fillSheet(info.sheet);
   };
 
   const collect = (): AppConfig => {
@@ -137,6 +154,16 @@ async function main(): Promise<void> {
       invoke("open_path", { which: button.dataset.open }).catch((err) => setStatus(String(err), "error"));
     });
   }
+  byId<HTMLButtonElement>("reload-sheet").addEventListener("click", async () => {
+    try {
+      const sheet = await invoke<SheetStatus>("reload_sheet");
+      fillSheet(sheet);
+      // 素材がまだ無いのは異常ではないので、赤にはしない
+      setStatus(sheet.usable ? "立ち絵を読み直しました" : `立ち絵は使えません: ${sheet.reason ?? ""}`, sheet.usable ? "ok" : "");
+    } catch (err) {
+      setStatus(String(err), "error");
+    }
+  });
   byId<HTMLButtonElement>("reload-persona").addEventListener("click", async () => {
     try {
       await invoke("reload_persona");

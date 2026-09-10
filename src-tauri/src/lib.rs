@@ -6,10 +6,12 @@
 mod bridge;
 mod channel;
 mod config;
+mod fulltext;
 mod notify;
 mod persona;
 mod server;
 mod settings;
+mod sprite;
 
 use std::{
     fs,
@@ -48,6 +50,7 @@ const MENU_PIN_PANEL: &str = "pin_panel";
 const MENU_OPEN_SETTINGS: &str = "open_settings";
 const MENU_AUTOSTART: &str = "autostart";
 const MENU_TALK: &str = "talk";
+const MENU_OPEN_FULLTEXT: &str = "open_fulltext";
 /// webview が購読する、入力欄を開くイベント(Phase 10)。
 pub const COMPOSER_EVENT: &str = "secretary://composer";
 /// webview が購読する、パネル固定の切り替えイベント。
@@ -75,6 +78,8 @@ struct TrayHandle<R: Runtime> {
     #[allow(dead_code)]
     tray: TrayIcon<R>,
     status: MenuItem<R>,
+    /// 控えができたら有効にする。トレイのメニューは起動時に一度組むだけなので、後から触る
+    open_fulltext: MenuItem<R>,
 }
 
 /// ユーザー操作に関わる切り替え状態。
@@ -99,7 +104,7 @@ fn status_label(state: AssistantState) -> &'static str {
     }
 }
 
-/// トレイの状態行を更新する。bridge::publish から呼ばれる。
+/// トレイの状態行(追跡中セッションと状態)を更新する。bridge::publish から呼ばれる。
 pub fn update_tray_status<R: Runtime>(app: &AppHandle<R>, snapshot: &SecretarySnapshot) {
     let Some(handle) = app.try_state::<TrayHandle<R>>() else {
         return;
@@ -110,6 +115,17 @@ pub fn update_tray_status<R: Runtime>(app: &AppHandle<R>, snapshot: &SecretarySn
     };
     if let Err(e) = handle.status.set_text(text) {
         eprintln!("tray status update failed: {e}");
+    }
+}
+
+/// トレイの「発言の全文を見る…」の有効 / 無効を控えの有無に合わせる。
+/// トレイのメニューは起動時に一度組むだけなので、後から触る必要がある。
+pub fn update_tray_fulltext_item<R: Runtime>(app: &AppHandle<R>, has_speech: bool) {
+    let Some(handle) = app.try_state::<TrayHandle<R>>() else {
+        return;
+    };
+    if let Err(e) = handle.open_fulltext.set_enabled(has_speech) {
+        eprintln!("tray fulltext item update failed: {e}");
     }
 }
 
@@ -231,11 +247,20 @@ fn show_context_menu(app: AppHandle, window: tauri::Window) -> Result<(), String
         .try_state::<Arc<Interaction>>()
         .map(|ui| ui.panel_pinned.load(Ordering::Relaxed))
         .unwrap_or(false);
+    // 控えが無いうちは開いても空なので、項目ごと無効にする
+    let has_full = fulltext::has_speech(&app);
     let build = || -> tauri::Result<Menu<tauri::Wry>> {
         Menu::with_items(
             &app,
             &[
                 &MenuItem::with_id(&app, MENU_TALK, "話しかける…", true, None::<&str>)?,
+                &MenuItem::with_id(
+                    &app,
+                    MENU_OPEN_FULLTEXT,
+                    "発言の全文を見る…",
+                    has_full,
+                    None::<&str>,
+                )?,
                 &PredefinedMenuItem::separator(&app)?,
                 &CheckMenuItem::with_id(
                     &app,
@@ -470,11 +495,19 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "終了", true, None::<&str>)?;
     let talk = MenuItem::with_id(app, MENU_TALK, "話しかける…", true, None::<&str>)?;
+    let open_fulltext = MenuItem::with_id(
+        app,
+        MENU_OPEN_FULLTEXT,
+        "発言の全文を見る…",
+        fulltext::has_speech(app),
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[
             &status,
             &talk,
+            &open_fulltext,
             &PredefinedMenuItem::separator(app)?,
             &click_through,
             &always_on_top,
@@ -559,6 +592,7 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                 }
             }
             MENU_TALK => open_composer(app),
+            MENU_OPEN_FULLTEXT => fulltext::open_fulltext_window(app),
             MENU_ALWAYS_ON_TOP => {
                 let on = always_on_top.is_checked().unwrap_or(true);
                 if let Some(window) = character_window(app) {
@@ -595,9 +629,28 @@ fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .build(app)?;
-    app.manage(TrayHandle { tray, status });
+    app.manage(TrayHandle {
+        tray,
+        status,
+        open_fulltext,
+    });
 
     Ok(())
+}
+
+/// ラベルのウィンドウを出して前面に持ってくる。閉じても隠すだけのウィンドウ用。
+pub fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> bool {
+    let Some(window) = app.get_webview_window(label) else {
+        eprintln!("[{label}] window not found");
+        return false;
+    };
+    match window.show().and_then(|_| window.set_focus()) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[{label}] show failed: {e}");
+            false
+        }
+    }
 }
 
 /// フロントエンドからの診断ログ。WebView の様子をターミナル側で確認するために使う。
@@ -615,9 +668,11 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_notification::init())
         .manage(SnapshotBridge::new())
-        // 設定ウィンドウは閉じても隠すだけにして、次に開くときに作り直さない
+        // 設定と全文ビューは閉じても隠すだけにして、次に開くときに作り直さない
         .on_window_event(|window, event| {
-            if window.label() == settings::SETTINGS_WINDOW {
+            if window.label() == settings::SETTINGS_WINDOW
+                || window.label() == fulltext::FULLTEXT_WINDOW
+            {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
@@ -661,13 +716,16 @@ pub fn run() {
             bridge::get_snapshot,
             show_context_menu,
             set_interactive,
+            fulltext::full_speech,
             channel::send_prompt,
             channel::respond_permission,
             settings::settings_info,
             settings::save_config,
             settings::set_autostart,
             settings::open_path,
-            settings::reload_persona
+            settings::reload_persona,
+            sprite::sheet_status,
+            sprite::reload_sheet
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -10,7 +10,7 @@
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -21,10 +21,12 @@ use axum::{
     Router,
 };
 use secretary_core::{
-    AssistantState, ChannelCommand, ChannelEvent, FollowPolicy, HookEnvelope, HookEvent,
-    SecretarySnapshot, Tracker,
+    strip_markdown, AssistantState, ChannelCommand, ChannelEvent, FollowPolicy, HookEnvelope,
+    HookEvent, SecretarySnapshot, Tracker,
 };
+use serde::Serialize;
 use tauri::{AppHandle, Runtime};
+use ts_rs::TS;
 
 use crate::{
     bridge,
@@ -38,12 +40,35 @@ use crate::{
 pub const NO_CHANNEL_HINT: &str =
     "秘書につながっているセッションがありません。claude --dangerously-load-development-channels server:secretary で起動してください";
 
+/// 全文ビューが控える本文の上限。実用上まず当たらないが、
+/// 病的に長い応答でメモリと描画を潰さないための歯止め。当たったときは黙らず `truncated` で示す。
+const FULL_SPEECH_MAX_CHARS: usize = 100_000;
+
+/// 全文ビューが読む、最後の応答本文。
+///
+/// 吹き出しに出す文言(切り詰め済み)とは別物で、こちらは切らずに控える。
+/// ADR-0002 の通りセッションではなく `Core` の持ち物なので、セッションが終わっても残る。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct FullSpeech {
+    /// markdown 記号を落とした本文
+    pub text: String,
+    /// どのセッションのものか(cwd の末尾ディレクトリ名など、人が読めるラベル)
+    pub session_label: String,
+    /// 受け取った時刻(UNIX epoch ミリ秒)。表示の整形は webview 側で行う
+    pub received_at_ms: f64,
+    /// 上限に当たって切ったか
+    pub truncated: bool,
+}
+
 /// Tracker と人格、最後に配信したスナップショット。
 pub struct Core {
     tracker: Mutex<Tracker>,
     persona: Mutex<Persona>,
     token: String,
     last_published: Mutex<Option<SecretarySnapshot>>,
+    /// 全文ビュー用の控え。常に 1 件だけで、永続化しない
+    last_full_speech: Mutex<Option<FullSpeech>>,
     hub: ChannelHub,
     config: Mutex<AppConfig>,
 }
@@ -55,6 +80,7 @@ impl Core {
             persona: Mutex::new(persona),
             token,
             last_published: Mutex::new(None),
+            last_full_speech: Mutex::new(None),
             hub: ChannelHub::default(),
             config: Mutex::new(config),
         }
@@ -92,11 +118,60 @@ impl Core {
         eprintln!("[hook] {}", summarize(&envelope));
         let now = Instant::now();
         let event = self.tracker.lock().unwrap().apply(&envelope, now);
+        if let HookEvent::Stop {
+            last_assistant_message: Some(text),
+            ..
+        } = &event
+        {
+            self.remember_full_speech(&envelope.session_id, text);
+        }
         self.persona
             .lock()
             .unwrap()
             .on_event(&envelope.session_id, &event, now);
         Ok(event)
+    }
+
+    /// 全文ビュー用に応答本文を控える。追跡対象のセッションのぶんだけ持つ。
+    fn remember_full_speech(&self, session_id: &str, text: &str) {
+        if !self
+            .tracker
+            .lock()
+            .unwrap()
+            .is_session_followed(session_id)
+        {
+            return;
+        }
+        let stripped = strip_markdown(text.trim());
+        let stripped = stripped.trim();
+        if stripped.is_empty() {
+            return;
+        }
+        let truncated = stripped.chars().count() > FULL_SPEECH_MAX_CHARS;
+        let body: String = if truncated {
+            stripped.chars().take(FULL_SPEECH_MAX_CHARS).collect()
+        } else {
+            stripped.to_string()
+        };
+        // 控えのロックを取る前に組み立てる(session_label が tracker を取りに行くので、
+        // 2 つのロックを同時に持たない)
+        let message = FullSpeech {
+            text: body,
+            session_label: self.session_label(session_id),
+            received_at_ms: now_epoch_ms(),
+            truncated,
+        };
+        *self.last_full_speech.lock().unwrap() = Some(message);
+    }
+
+    /// 全文ビューが読む控え。まだ一度も応答が無ければ `None`。
+    pub fn full_speech(&self) -> Option<FullSpeech> {
+        self.last_full_speech.lock().unwrap().clone()
+    }
+
+    /// 控えがあるか。メニューの有効 / 無効を決めるだけなので、本文は複製しない。
+    pub fn has_full_speech(&self) -> bool {
+        self.last_full_speech.lock().unwrap().is_some()
     }
 
     /// 現在のスナップショット(人格で飾ったもの)が前回配信と異なれば返す(そして記録する)。
@@ -264,12 +339,28 @@ impl Core {
     }
 }
 
+/// 壁時計を UNIX epoch ミリ秒で。`secretary-core` は Instant しか扱わない契約なので、
+/// 絶対時刻が要る全文ビューのぶんだけここで取る。
+fn now_epoch_ms() -> f64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as f64,
+        Err(e) => {
+            eprintln!("[fulltext] clock is before the epoch: {e}");
+            0.0
+        }
+    }
+}
+
 fn short(session_id: &str) -> String {
     session_id.chars().take(8).collect()
 }
 
 /// 変化があれば webview へ配信する。イベント適用後と定期処理から呼ぶ。
 pub fn refresh<R: Runtime>(app: &AppHandle<R>, core: &Core) {
+    // 控えは吹き出しの主とは無関係に増えるので、スナップショットの変化とは切り離して合わせる。
+    // ここを publish の中に置くと、別セッションが吹き出しを占めている間に控えができたとき、
+    // トレイの項目が無効のまま残って全文ビューに到達できなくなる(ADR-0001)。
+    crate::update_tray_fulltext_item(app, core.has_full_speech());
     if let Some((prev, snapshot)) = core.changed_snapshot_with_prev() {
         eprintln!(
             "[snapshot] {:?} session={} message={:?}",
@@ -475,6 +566,83 @@ mod tests {
             Persona::new(crate::persona::PersonaConfig::default()),
             "secret".into(),
         )
+    }
+
+    /// 既定(channel 由来のセッションだけを追跡)の Core。
+    fn core_channel_only() -> Core {
+        Core::new(
+            AppConfig::default(),
+            Persona::new(crate::persona::PersonaConfig::default()),
+            "secret".into(),
+        )
+    }
+
+    fn stop_body(session: &str, message: &str) -> String {
+        serde_json::json!({
+            "session_id": session,
+            "hook_event_name": "Stop",
+            "cwd": "/Users/me/workspace/myproject",
+            "last_assistant_message": message,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn stop_remembers_the_full_assistant_message() {
+        let core = core();
+        let long = "あ".repeat(500);
+        core.ingest(&stop_body("s1", &format!("**見出し**\n{long}")))
+            .unwrap();
+        let full = core.full_speech().expect("控えられているはず");
+        // 吹き出しは 120 字で切るが、全文ビューは切らない
+        assert_eq!(full.text, format!("見出し\n{long}"));
+        assert!(!full.truncated);
+        assert_eq!(full.session_label, "myproject");
+        assert!(full.received_at_ms > 0.0);
+    }
+
+    #[test]
+    fn full_speech_is_not_remembered_for_unfollowed_sessions() {
+        let core = core_channel_only();
+        core.ingest(&stop_body("plain", "ターミナルで直接動かしたぶん"))
+            .unwrap();
+        assert!(core.full_speech().is_none());
+    }
+
+    #[test]
+    fn full_speech_survives_session_end() {
+        // ADR-0002: SessionState は SessionEnd で捨てられるので、全文は Core に持つ
+        let core = core();
+        core.ingest(&stop_body("s1", "読み返したい長い応答")).unwrap();
+        core.ingest(
+            &serde_json::json!({"session_id":"s1","hook_event_name":"SessionEnd"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            core.full_speech().map(|f| f.text),
+            Some("読み返したい長い応答".to_string())
+        );
+    }
+
+    #[test]
+    fn a_newer_assistant_message_replaces_the_previous_one() {
+        let core = core();
+        core.ingest(&stop_body("s1", "ふるい")).unwrap();
+        core.ingest(&stop_body("s2", "あたらしい")).unwrap();
+        assert_eq!(
+            core.full_speech().map(|f| f.text),
+            Some("あたらしい".to_string())
+        );
+    }
+
+    #[test]
+    fn absurdly_long_messages_are_capped_and_say_so() {
+        let core = core();
+        core.ingest(&stop_body("s1", &"x".repeat(FULL_SPEECH_MAX_CHARS + 10)))
+            .unwrap();
+        let full = core.full_speech().unwrap();
+        assert_eq!(full.text.chars().count(), FULL_SPEECH_MAX_CHARS);
+        assert!(full.truncated, "黙って切らず、切ったことを見せる");
     }
 
     #[test]

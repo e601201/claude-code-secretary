@@ -21,6 +21,12 @@ export function durationFor(text: string, kind: SpeechKind): number {
   }
 }
 
+/** 中身が枠に収まりきっていないか。切れているときだけフェードを出すために見る */
+export function isClipped(el: { scrollHeight: number; clientHeight: number }): boolean {
+  // 実測値は端数を持つので、1px 未満の差は切れていないものとして扱う
+  return el.scrollHeight - el.clientHeight >= 1;
+}
+
 /** input_preview(JSON 風の文字列)を「キー: 値」の行に崩す。JSON でなければそのまま 1 行 */
 export function previewLines(raw: string): string[] {
   const trimmed = raw.trim();
@@ -117,6 +123,8 @@ export class SpeechBubble {
     this.root.classList.remove("visible");
     void this.root.offsetWidth;
     this.root.classList.add("visible");
+    // 文字を入れた後でないと測れない。切れているときだけ下端をぼかす
+    this.root.classList.toggle("clipped", isClipped(this.textEl));
     this.log(`bubble show kind=${kind} duration=${durationMs} text=${JSON.stringify(text)}`);
     if (durationMs > 0) {
       this.timer = setTimeout(() => this.hide(), durationMs);

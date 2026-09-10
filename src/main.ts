@@ -9,12 +9,15 @@ import { SpeechBubble } from "./bubble/bubble";
 import { Character } from "./character/character";
 import { Composer } from "./composer/composer";
 import type { SecretarySnapshot } from "./generated/SecretarySnapshot";
+import type { SheetStatus } from "./generated/SheetStatus";
 import { StatusPanel } from "./panel/panel";
 
 /** Rust 側 bridge.rs の SNAPSHOT_EVENT と一致させる */
 const SNAPSHOT_EVENT = "secretary://snapshot";
 /** Rust 側 lib.rs の PANEL_PIN_EVENT と一致させる */
 const PANEL_PIN_EVENT = "secretary://panel-pin";
+/** Rust 側 sprite.rs の SHEET_EVENT と一致させる */
+const SHEET_EVENT = "secretary://sheet";
 /** Rust 側 lib.rs の COMPOSER_EVENT と一致させる */
 const COMPOSER_EVENT = "secretary://composer";
 /** ウィンドウの基準幅。Rust 側 lib.rs の BASE_WIDTH と一致させる */
@@ -37,7 +40,7 @@ function byId<T extends HTMLElement>(id: string): T | null {
 
 async function main(): Promise<void> {
   const stage = byId<HTMLElement>("stage");
-  const img = byId<HTMLImageElement>("character");
+  const characterEl = byId<HTMLElement>("character");
   const badge = byId<HTMLElement>("badge");
   const bubbleEl = byId<HTMLElement>("bubble");
   const bubbleText = byId<HTMLElement>("bubble-text");
@@ -54,7 +57,7 @@ async function main(): Promise<void> {
   const composerInput = byId<HTMLInputElement>("composer-input");
   const talkButton = byId<HTMLButtonElement>("talk-button");
   if (
-    !stage || !img || !badge || !bubbleEl || !bubbleText || !bubbleDetail || !bubbleActions ||
+    !stage || !characterEl || !badge || !bubbleEl || !bubbleText || !bubbleDetail || !bubbleActions ||
     !permAllow || !permDeny || !panelEl || !panelStatus || !panelSession || !panelTask ||
     !panelTool || !composerForm || !composerInput || !talkButton
   ) {
@@ -64,7 +67,7 @@ async function main(): Promise<void> {
   applyZoom(stage);
   window.addEventListener("resize", () => applyZoom(stage));
 
-  const character = new Character(stage, img, badge, log);
+  const character = new Character(stage, characterEl, badge, log);
   const bubble = new SpeechBubble(bubbleEl, bubbleText, log, {
     detail: bubbleDetail,
     actions: bubbleActions,
@@ -130,7 +133,9 @@ async function main(): Promise<void> {
     composer.toggle();
   });
 
-  await character.mount();
+  // 立ち絵。Rust 側が検めた結果を受け取り、使えなければプレースホルダーで動く
+  void listen<SheetStatus>(SHEET_EVENT, (event) => character.setSheet(event.payload));
+  character.setSheet(await invoke<SheetStatus>("sheet_status").catch(() => null));
 
   const apply = (snapshot: SecretarySnapshot): void => {
     character.setState(snapshot.status);
