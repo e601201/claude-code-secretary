@@ -43,7 +43,8 @@ fi
 
 # --- 1. 原画を集め、キャンバスと足元を測る -------------------------------------
 # α が 50% 以上の画素の外接矩形を「絵の実寸」とみなす。
-declare -a PRESENT=() MISSING=()
+PRESENT=""
+MISSING=""
 UL=999999; UT=999999; UR=0; UB=0   # 全コマの和集合(left/top/right/bottom)
 CW=0; CH=0
 declare -a BOTTOMS=()
@@ -51,8 +52,8 @@ declare -a BOTTOMS=()
 for st in "${STATES[@]}"; do
   have=1
   for i in $(seq 1 $COLS); do [ -f "$IN/$st$i.png" ] || have=0; done
-  if [ "$have" -eq 0 ]; then MISSING+=("$st"); continue; fi
-  PRESENT+=("$st")
+  if [ "$have" -eq 0 ]; then MISSING="$MISSING $st"; continue; fi
+  PRESENT="$PRESENT $st"
   sb=0
   for i in $(seq 1 $COLS); do
     f="$IN/$st$i.png"
@@ -71,7 +72,7 @@ for st in "${STATES[@]}"; do
   BOTTOMS+=("$st:$sb")
 done
 
-[ "${#PRESENT[@]}" -gt 0 ] || { echo "$IN に原画がありません" >&2; exit 1; }
+[ -n "$PRESENT" ] || { echo "$IN に原画がありません" >&2; exit 1; }
 
 # --- 2. 足元のずれを報告する --------------------------------------------------
 sorted=$(for b in "${BOTTOMS[@]}"; do echo "${b#*:}"; done | sort -n)
@@ -86,7 +87,7 @@ for b in "${BOTTOMS[@]}"; do
     echo "    $st: 足元 y=$v"
   fi
 done
-for st in "${MISSING[@]}"; do echo "    $st: 原画なし → 透明の行にする"; done
+for st in $MISSING; do echo "    $st: 原画なし → 透明の行にする"; done
 
 # --- 3. 切り出す枠を 1 つ決める(和集合 + 余白 → 3:4) --------------------------
 mx=$(( (UR - UL) * MARGIN / 100 )); my=$(( (UB - UT) * MARGIN / 100 ))
