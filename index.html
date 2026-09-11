@@ -28,6 +28,8 @@
       </div>
       <!-- 秘書 → Claude Code の入力欄(Phase 10)。Enter で送り、Esc で閉じる -->
       <form id="composer" hidden autocomplete="off">
+        <!-- 話し相手。開いた時点で決まり、閉じるまで変わらない -->
+        <div id="composer-partner" aria-live="polite"></div>
         <input
           id="composer-input"
           type="text"

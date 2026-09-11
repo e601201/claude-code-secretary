@@ -10,10 +10,13 @@ import { Character } from "./character/character";
 import { Composer } from "./composer/composer";
 import type { SecretarySnapshot } from "./generated/SecretarySnapshot";
 import type { SheetStatus } from "./generated/SheetStatus";
+import type { TalkPartner } from "./generated/TalkPartner";
 import { StatusPanel } from "./panel/panel";
 
 /** Rust 側 bridge.rs の SNAPSHOT_EVENT と一致させる */
 const SNAPSHOT_EVENT = "secretary://snapshot";
+/** Rust 側 bridge.rs の TALK_PARTNER_EVENT と一致させる */
+const TALK_PARTNER_EVENT = "secretary://talk-partner";
 /** Rust 側 lib.rs の PANEL_PIN_EVENT と一致させる */
 const PANEL_PIN_EVENT = "secretary://panel-pin";
 /** Rust 側 sprite.rs の SHEET_EVENT と一致させる */
@@ -55,11 +58,13 @@ async function main(): Promise<void> {
   const panelTool = byId<HTMLElement>("panel-tool");
   const composerForm = byId<HTMLFormElement>("composer");
   const composerInput = byId<HTMLInputElement>("composer-input");
+  const composerPartner = byId<HTMLElement>("composer-partner");
+  const composerSend = byId<HTMLButtonElement>("composer-send");
   const talkButton = byId<HTMLButtonElement>("talk-button");
   if (
     !stage || !characterEl || !badge || !bubbleEl || !bubbleText || !bubbleDetail || !bubbleActions ||
     !permAllow || !permDeny || !panelEl || !panelStatus || !panelSession || !panelTask ||
-    !panelTool || !composerForm || !composerInput || !talkButton
+    !panelTool || !composerForm || !composerInput || !composerPartner || !composerSend || !talkButton
   ) {
     return;
   }
@@ -91,21 +96,28 @@ async function main(): Promise<void> {
   };
 
   const composer = new Composer(
-    composerForm,
-    composerInput,
-    async (text) => {
-      try {
-        const label = await invoke<string>("send_prompt", { text });
-        log(`sent to ${label}: ${JSON.stringify(text)}`);
-        bubble.show(`${label} へ送りました`, "assistant", 2500);
-      } catch (e) {
-        bubble.show(String(e), "system", 8000);
-        throw e;
-      }
-    },
-    (open) => {
-      stage.classList.toggle("composing", open);
-      syncInteractive();
+    { form: composerForm, input: composerInput, partner: composerPartner, send: composerSend },
+    {
+      onSubmit: async (text, sessionId) => {
+        try {
+          const label = await invoke<string>("send_prompt", { text, sessionId });
+          log(`sent to ${label}: ${JSON.stringify(text)}`);
+          bubble.show(`${label} へ送りました`, "assistant", 2500);
+        } catch (e) {
+          bubble.show(String(e), "system", 8000);
+          throw e;
+        }
+      },
+      onOpen: () => {
+        invoke("composer_opened").catch((e) => log(`composer_opened failed: ${String(e)}`));
+      },
+      onClose: () => {
+        invoke("composer_closed").catch((e) => log(`composer_closed failed: ${String(e)}`));
+      },
+      onToggle: (open) => {
+        stage.classList.toggle("composing", open);
+        syncInteractive();
+      },
     },
   );
 
@@ -152,6 +164,8 @@ async function main(): Promise<void> {
       if (event.payload) composer.open();
       else composer.close();
     });
+    // 入力欄が開いている間、接続の増減で話し相手の見え方が変わる
+    await listen<TalkPartner>(TALK_PARTNER_EVENT, (event) => composer.setPartner(event.payload));
     // 購読前に流れたぶんを取りこぼさないよう、最後のスナップショットを取りに行く
     apply(await invoke<SecretarySnapshot>("get_snapshot"));
   } catch (e) {

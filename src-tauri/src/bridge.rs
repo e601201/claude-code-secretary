@@ -8,10 +8,12 @@ use std::{sync::Mutex, thread, time::Duration};
 use secretary_core::{AssistantState, RelayedPermission, SecretarySnapshot, SpeechKind};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::CHARACTER_WINDOW;
+use crate::{server::TalkPartner, CHARACTER_WINDOW};
 
 /// webview が購読するイベント名。
 pub const SNAPSHOT_EVENT: &str = "secretary://snapshot";
+/// 入力欄が開いている間、話し相手が変わったときに流すイベント名。
+pub const TALK_PARTNER_EVENT: &str = "secretary://talk-partner";
 
 /// 6 状態を表示順に並べたもの。デモやデバッグメニューで使う。
 pub const ALL_STATES: [AssistantState; 6] = [
@@ -48,6 +50,13 @@ pub fn publish<R: Runtime>(app: &AppHandle<R>, snapshot: SecretarySnapshot) {
     crate::update_tray_status(app, &snapshot);
     if let Err(e) = app.emit_to(CHARACTER_WINDOW, SNAPSHOT_EVENT, &snapshot) {
         eprintln!("emit snapshot failed: {e}");
+    }
+}
+
+/// 話し相手の変化をキャラクターウィンドウへ送る。
+pub fn publish_talk_partner<R: Runtime>(app: &AppHandle<R>, partner: &TalkPartner) {
+    if let Err(e) = app.emit_to(CHARACTER_WINDOW, TALK_PARTNER_EVENT, partner) {
+        eprintln!("emit talk partner failed: {e}");
     }
 }
 

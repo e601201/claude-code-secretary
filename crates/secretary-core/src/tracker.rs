@@ -121,6 +121,12 @@ impl Tracker {
             .note_reply(text, now, &hold);
     }
 
+    /// 秘書 channel がつながった。まだ何も話しかけていなくても把握はしておく(ラベルの
+    /// 見分けと、話し相手の候補のため)。追跡対象になるかどうかは方針が決める。
+    pub fn note_channel_hello(&mut self, session_id: &str, cwd: Option<&str>, now: Instant) {
+        self.session_entry(session_id, cwd, now);
+    }
+
     fn session_entry(&mut self, id: &str, cwd: Option<&str>, now: Instant) -> &mut SessionState {
         let session = self
             .sessions
@@ -131,10 +137,12 @@ impl Tracker {
     }
 
     /// 失効したセッションを削除し、削除数を返す。
-    pub fn expire_stale(&mut self, now: Instant) -> usize {
+    /// `keep` が true を返すセッション(秘書につながっているもの)は、hook が来ていなくても残す。
+    pub fn expire_stale(&mut self, now: Instant, keep: impl Fn(&str) -> bool) -> usize {
         let before = self.sessions.len();
         let ttl = self.cfg.stale_after;
-        self.sessions.retain(|_, s| !s.is_stale(now, ttl));
+        self.sessions
+            .retain(|id, s| keep(id) || !s.is_stale(now, ttl));
         before - self.sessions.len()
     }
 
@@ -144,6 +152,34 @@ impl Tracker {
 
     pub fn session(&self, id: &str) -> Option<&SessionState> {
         self.sessions.get(id)
+    }
+
+    /// 人が読めるラベル。cwd の末尾ディレクトリ名を基本にし、同じ名前のセッションが
+    /// 他にもあるときだけ session_id の先頭(4 文字、足りなければ見分けが付くまで)を添える。
+    /// 母集団は把握している全セッション(追跡対象かどうかは問わない)。
+    pub fn label_of(&self, id: &str) -> Option<String> {
+        let target = self.sessions.get(id)?;
+        let base = target.label();
+        let same_name: Vec<&str> = self
+            .sessions
+            .values()
+            .filter(|s| s.id() != id && s.label() == base)
+            .map(|s| s.id())
+            .collect();
+        if same_name.is_empty() {
+            return Some(base);
+        }
+        let mut n = 4;
+        loop {
+            let prefix: String = id.chars().take(n).collect();
+            let clashes = same_name
+                .iter()
+                .any(|other| other.chars().take(n).collect::<String>() == prefix);
+            if !clashes || prefix.chars().count() < n {
+                return Some(format!("{base} {prefix}"));
+            }
+            n += 1;
+        }
     }
 
     fn is_followed(&self, s: &SessionState) -> bool {
@@ -202,7 +238,7 @@ impl Tracker {
             pending_permission: best.pending_permission().map(str::to_string),
             relayed_permission: best.relayed_permission().cloned(),
             session_id: Some(best.id().to_string()),
-            session_label: Some(best.label()),
+            session_label: self.label_of(best.id()),
             tracked_sessions: followed.len() as u32,
         }
     }
@@ -265,7 +301,8 @@ mod tests {
         let snap = t.snapshot(now);
         assert_eq!(snap.status, AssistantState::Thinking);
         assert_eq!(snap.session_id.as_deref(), Some("disc"));
-        assert_eq!(snap.session_label.as_deref(), Some("repo"));
+        // 追跡対象外の dev と同じディレクトリなので、ラベルは見分けが付く形になる
+        assert_eq!(snap.session_label.as_deref(), Some("repo disc"));
         assert_eq!(snap.task_summary.as_deref(), Some("やって"));
         assert_eq!(snap.tracked_sessions, 1);
     }
@@ -482,7 +519,10 @@ mod tests {
             now,
         );
         assert_eq!(t.sessions().count(), 1);
-        assert_eq!(t.expire_stale(now + Duration::from_secs(31 * 60)), 1);
+        assert_eq!(
+            t.expire_stale(now + Duration::from_secs(31 * 60), |_| false),
+            1
+        );
         assert_eq!(t.snapshot(now).tracked_sessions, 0);
     }
 
@@ -497,5 +537,139 @@ mod tests {
         assert!(matches!(ev, HookEvent::UserPromptSubmit { .. }));
         assert_eq!(t.snapshot(now).status, AssistantState::Thinking);
         assert!(t.apply_json("not json", now).is_err());
+    }
+
+    #[test]
+    fn labels_are_plain_unless_two_sessions_share_a_directory() {
+        let mut t = Tracker::new(TrackerConfig::default());
+        let now = Instant::now();
+        t.apply(
+            &env(
+                "1a2b3c4d-1",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        t.apply(
+            &env(
+                "9f8e7d6c-2",
+                "/w/lib",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        assert_eq!(t.label_of("1a2b3c4d-1").as_deref(), Some("app"));
+        assert_eq!(t.label_of("9f8e7d6c-2").as_deref(), Some("lib"));
+        assert_eq!(t.label_of("nope"), None);
+
+        // 同じディレクトリで並走したら、session_id の先頭 4 文字で見分ける
+        t.apply(
+            &env(
+                "5e6f7a8b-3",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        assert_eq!(t.label_of("1a2b3c4d-1").as_deref(), Some("app 1a2b"));
+        assert_eq!(t.label_of("5e6f7a8b-3").as_deref(), Some("app 5e6f"));
+        assert_eq!(t.label_of("9f8e7d6c-2").as_deref(), Some("lib"));
+    }
+
+    #[test]
+    fn label_prefix_grows_until_it_tells_sessions_apart() {
+        let mut t = Tracker::new(TrackerConfig::default());
+        let now = Instant::now();
+        t.apply(
+            &env(
+                "1a2b3c4d-1",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        t.apply(
+            &env(
+                "1a2b9999-2",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        assert_eq!(t.label_of("1a2b3c4d-1").as_deref(), Some("app 1a2b3"));
+        assert_eq!(t.label_of("1a2b9999-2").as_deref(), Some("app 1a2b9"));
+    }
+
+    #[test]
+    fn snapshot_label_tells_same_directory_sessions_apart() {
+        let mut t = Tracker::new(TrackerConfig {
+            follow: FollowPolicy::All,
+            ..Default::default()
+        });
+        let now = Instant::now();
+        t.apply(
+            &env(
+                "1a2b3c4d-1",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now,
+        );
+        t.apply(
+            &env(
+                "5e6f7a8b-2",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": "x"}),
+            ),
+            now + Duration::from_secs(1),
+        );
+        let snap = t.snapshot(now + Duration::from_secs(1));
+        assert_eq!(snap.session_id.as_deref(), Some("5e6f7a8b-2"));
+        assert_eq!(snap.session_label.as_deref(), Some("app 5e6f"));
+    }
+
+    #[test]
+    fn channel_hello_makes_the_session_known_but_not_followed() {
+        let mut t = Tracker::new(TrackerConfig::default());
+        let now = Instant::now();
+        t.apply(
+            &env(
+                "1a2b3c4d-1",
+                "/w/app",
+                "UserPromptSubmit",
+                json!({"prompt": DISCORD}),
+            ),
+            now,
+        );
+        // 秘書につないだだけで、まだ何も話しかけていないセッション
+        t.note_channel_hello("5e6f7a8b-2", Some("/w/app"), now);
+        assert_eq!(t.label_of("5e6f7a8b-2").as_deref(), Some("app 5e6f"));
+        assert!(!t.is_session_followed("5e6f7a8b-2"));
+        let snap = t.snapshot(now);
+        assert_eq!(snap.session_label.as_deref(), Some("app 1a2b"));
+        assert_eq!(snap.tracked_sessions, 1);
+    }
+
+    #[test]
+    fn connected_sessions_do_not_expire_without_hooks() {
+        let mut t = Tracker::new(TrackerConfig::default());
+        let now = Instant::now();
+        t.note_channel_hello("1a2b3c4d-1", Some("/w/app"), now);
+        t.note_channel_hello("5e6f7a8b-2", Some("/w/app"), now);
+        let later = now + Duration::from_secs(31 * 60);
+        // 昼休みで放置しても、つながっている限り把握し続ける
+        assert_eq!(t.expire_stale(later, |id| id == "1a2b3c4d-1"), 1);
+        assert_eq!(t.label_of("1a2b3c4d-1").as_deref(), Some("app"));
+        assert_eq!(t.label_of("5e6f7a8b-2"), None);
+        assert_eq!(t.expire_stale(later, |_| false), 1);
+        assert_eq!(t.label_of("1a2b3c4d-1"), None);
     }
 }
