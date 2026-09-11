@@ -5,7 +5,7 @@
 //! ソケットは設定ディレクトリ直下の `channel.sock`(0600)。
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
@@ -28,7 +28,6 @@ use crate::server::{self, Core};
 struct Conn {
     id: u64,
     tx: mpsc::UnboundedSender<ChannelCommand>,
-    cwd: Option<String>,
     since: Instant,
 }
 
@@ -40,22 +39,30 @@ pub struct ChannelHub {
 }
 
 impl ChannelHub {
-    fn register(&self, session_id: &str, conn: Conn) {
+    /// 接続を台帳に載せ、その接続の番号を返す(切るときに同じ番号を渡す)。
+    pub(crate) fn register(
+        &self,
+        session_id: &str,
+        tx: mpsc::UnboundedSender<ChannelCommand>,
+        since: Instant,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let replaced = self
             .conns
             .lock()
             .unwrap()
-            .insert(session_id.to_string(), conn);
+            .insert(session_id.to_string(), Conn { id, tx, since });
         if replaced.is_some() {
             eprintln!(
                 "[channel] session={} reconnected, dropping the older link",
                 short(session_id)
             );
         }
+        id
     }
 
     /// この接続がまだ台帳にあるときだけ外す(同じセッションの新しい接続を消さないため)。
-    fn unregister(&self, session_id: &str, id: u64) -> bool {
+    pub(crate) fn unregister(&self, session_id: &str, id: u64) -> bool {
         let mut conns = self.conns.lock().unwrap();
         if conns.get(session_id).map(|c| c.id) == Some(id) {
             conns.remove(session_id);
@@ -69,18 +76,18 @@ impl ChannelHub {
         self.conns.lock().unwrap().len()
     }
 
-    pub fn cwd_of(&self, session_id: &str) -> Option<String> {
-        self.conns
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .and_then(|c| c.cwd.clone())
+    pub fn is_connected(&self, session_id: &str) -> bool {
+        self.conns.lock().unwrap().contains_key(session_id)
     }
 
-    /// 送り先を選ぶ。`preferred`(表示中のセッション)が接続中ならそれ、さもなくば最新の接続。
-    pub fn pick_target(&self, preferred: Option<&str>) -> Option<String> {
+    pub fn connected_ids(&self) -> HashSet<String> {
+        self.conns.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// 話し相手を選ぶ。`on_screen`(吹き出しの主)が接続中ならそれ、さもなくば最新の接続。
+    pub fn pick_partner(&self, on_screen: Option<&str>) -> Option<String> {
         let conns = self.conns.lock().unwrap();
-        if let Some(p) = preferred {
+        if let Some(p) = on_screen {
             if conns.contains_key(p) {
                 return Some(p.to_string());
             }
@@ -173,22 +180,14 @@ async fn handle(app: AppHandle, core: Arc<Core>, stream: UnixStream) {
     };
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ChannelCommand>();
-    let id = core.hub().next_id.fetch_add(1, Ordering::Relaxed);
-    core.hub().register(
-        &session_id,
-        Conn {
-            id,
-            tx,
-            cwd: cwd.clone(),
-            since: Instant::now(),
-        },
-    );
+    let id = core.on_channel_connect(&session_id, cwd.as_deref(), tx);
     eprintln!(
         "[channel] connected session={} pid={pid} cwd={} total={}",
         short(&session_id),
         cwd.as_deref().unwrap_or("-"),
         core.hub().len()
     );
+    server::refresh(&app, &core);
 
     let writer_task = tauri::async_runtime::spawn(async move {
         while let Some(cmd) = rx.recv().await {
@@ -217,8 +216,7 @@ async fn handle(app: AppHandle, core: Arc<Core>, stream: UnixStream) {
     }
 
     writer_task.abort();
-    if core.hub().unregister(&session_id, id) {
-        core.on_channel_disconnect(&session_id);
+    if core.on_channel_disconnect(&session_id, id) {
         server::refresh(&app, &core);
     }
     eprintln!(
@@ -228,14 +226,29 @@ async fn handle(app: AppHandle, core: Arc<Core>, stream: UnixStream) {
     );
 }
 
-/// 秘書の入力欄から。送り先のラベルを返す。
+/// webview が入力欄を開いた。この時点で話し相手が決まり、その姿は `refresh` が
+/// `TALK_PARTNER_EVENT` で流す(戻り値で返すと、その間に届いた変化を上書きしてしまう)。
+#[tauri::command]
+pub fn composer_opened(app: AppHandle, core: tauri::State<'_, Arc<Core>>) {
+    core.open_composer();
+    server::refresh(&app, &core);
+}
+
+/// webview が入力欄を閉じた。次に開くときは話し相手を選び直す。
+#[tauri::command]
+pub fn composer_closed(core: tauri::State<'_, Arc<Core>>) {
+    core.close_composer();
+}
+
+/// 秘書の入力欄から。`session_id` は入力欄が表示していた話し相手。届いた先のラベルを返す。
 #[tauri::command]
 pub fn send_prompt(
     app: AppHandle,
     core: tauri::State<'_, Arc<Core>>,
     text: String,
+    session_id: Option<String>,
 ) -> Result<String, String> {
-    let result = core.send_prompt(&text);
+    let result = core.send_prompt(&text, session_id.as_deref());
     server::refresh(&app, &core);
     result
 }
@@ -258,44 +271,33 @@ pub fn respond_permission(
 mod tests {
     use super::*;
 
-    fn conn(id: u64, since: Instant) -> (Conn, mpsc::UnboundedReceiver<ChannelCommand>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            Conn {
-                id,
-                tx,
-                cwd: Some(format!("/work/{id}")),
-                since,
-            },
-            rx,
-        )
-    }
-
     #[test]
-    fn pick_target_prefers_displayed_session_then_newest() {
+    fn pick_partner_prefers_the_session_on_screen_then_the_newest() {
         let hub = ChannelHub::default();
-        assert_eq!(hub.pick_target(Some("x")), None);
+        assert_eq!(hub.pick_partner(Some("x")), None);
         let now = Instant::now();
-        let (a, _ra) = conn(1, now);
-        let (b, _rb) = conn(2, now + Duration::from_secs(1));
-        hub.register("a", a);
-        hub.register("b", b);
-        assert_eq!(hub.pick_target(Some("a")).as_deref(), Some("a"));
-        assert_eq!(hub.pick_target(Some("zzz")).as_deref(), Some("b"));
-        assert_eq!(hub.pick_target(None).as_deref(), Some("b"));
-        assert_eq!(hub.cwd_of("a").as_deref(), Some("/work/1"));
+        let (ta, _ra) = mpsc::unbounded_channel();
+        let (tb, _rb) = mpsc::unbounded_channel();
+        hub.register("a", ta, now);
+        hub.register("b", tb, now + Duration::from_secs(1));
+        assert_eq!(hub.pick_partner(Some("a")).as_deref(), Some("a"));
+        assert_eq!(hub.pick_partner(Some("zzz")).as_deref(), Some("b"));
+        assert_eq!(hub.pick_partner(None).as_deref(), Some("b"));
+        assert!(hub.is_connected("a"));
+        assert!(!hub.is_connected("zzz"));
+        assert_eq!(hub.connected_ids().len(), 2);
     }
 
     #[test]
     fn send_reaches_the_connection_and_unregister_is_id_checked() {
         let hub = ChannelHub::default();
-        let (old, _r_old) = conn(1, Instant::now());
-        hub.register("s", old);
-        let (new, mut r_new) = conn(2, Instant::now());
-        hub.register("s", new);
+        let (t_old, _r_old) = mpsc::unbounded_channel();
+        let old = hub.register("s", t_old, Instant::now());
+        let (t_new, mut r_new) = mpsc::unbounded_channel();
+        let new = hub.register("s", t_new, Instant::now());
         // 古い接続の後始末は、新しい接続を消してはいけない
-        assert!(!hub.unregister("s", 1));
-        assert_eq!(hub.pick_target(Some("s")).as_deref(), Some("s"));
+        assert!(!hub.unregister("s", old));
+        assert_eq!(hub.pick_partner(Some("s")).as_deref(), Some("s"));
         hub.send("s", ChannelCommand::SendPrompt { text: "hi".into() })
             .unwrap();
         assert_eq!(
@@ -305,7 +307,7 @@ mod tests {
         assert!(hub
             .send("nope", ChannelCommand::SendPrompt { text: "x".into() })
             .is_err());
-        assert!(hub.unregister("s", 2));
+        assert!(hub.unregister("s", new));
         assert_eq!(hub.len(), 0);
     }
 }

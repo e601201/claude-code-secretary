@@ -61,6 +61,31 @@ pub struct FullSpeech {
     pub truncated: bool,
 }
 
+/// 入力欄に出す、話し相手が居ないときの 1 行。
+const NO_PARTNER_LINE: &str = "つながっているセッションがありません";
+
+/// 話し相手: 入力欄から話しかけた内容が届くセッション(CONTEXT.md)。
+///
+/// 入力欄を開いた時点で決まり、閉じるまで変わらない。見せる文言と送ってよいかも
+/// ここで決め、webview はそのまま描く。
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct TalkPartner {
+    /// 送るときに webview がそのまま `send_prompt` へ渡す。決まっていなければ `None`
+    pub session_id: Option<String>,
+    /// テキスト欄の上に出す 1 行(「◯◯ へ」など)
+    pub line: String,
+    /// 送ってよいか。相手が決まっていて、今もつながっているとき
+    pub can_send: bool,
+}
+
+/// 開いている入力欄。閉じている間は `Core::composer` が `None`。
+#[derive(Debug, Clone)]
+struct Composer {
+    partner: Option<String>,
+    on_screen: bool,
+}
+
 /// Tracker と人格、最後に配信したスナップショット。
 pub struct Core {
     tracker: Mutex<Tracker>,
@@ -71,6 +96,10 @@ pub struct Core {
     last_full_speech: Mutex<Option<FullSpeech>>,
     hub: ChannelHub,
     config: Mutex<AppConfig>,
+    /// 開いている入力欄と、その話し相手
+    composer: Mutex<Option<Composer>>,
+    /// 最後に webview へ配信した話し相手(変化したときだけ配信するため)
+    last_published_partner: Mutex<Option<TalkPartner>>,
 }
 
 impl Core {
@@ -83,6 +112,8 @@ impl Core {
             last_full_speech: Mutex::new(None),
             hub: ChannelHub::default(),
             config: Mutex::new(config),
+            composer: Mutex::new(None),
+            last_published_partner: Mutex::new(None),
         }
     }
 
@@ -134,12 +165,7 @@ impl Core {
 
     /// 全文ビュー用に応答本文を控える。追跡対象のセッションのぶんだけ持つ。
     fn remember_full_speech(&self, session_id: &str, text: &str) {
-        if !self
-            .tracker
-            .lock()
-            .unwrap()
-            .is_session_followed(session_id)
-        {
+        if !self.tracker.lock().unwrap().is_session_followed(session_id) {
             return;
         }
         let stripped = strip_markdown(text.trim());
@@ -196,8 +222,13 @@ impl Core {
         Some((prev, snapshot))
     }
 
+    /// 失効したセッションを片付ける。秘書につながっているセッションは、hook が来ていなくても残す。
     pub fn expire_stale(&self) -> usize {
-        self.tracker.lock().unwrap().expire_stale(Instant::now())
+        let connected = self.hub.connected_ids();
+        self.tracker
+            .lock()
+            .unwrap()
+            .expire_stale(Instant::now(), |id| connected.contains(id))
     }
 
     pub fn set_follow(&self, policy: FollowPolicy) {
@@ -242,42 +273,146 @@ impl Core {
         }
     }
 
-    /// channel が切れたら、その接続でしか答えられない権限要求のボタンを消す。
-    pub fn on_channel_disconnect(&self, session_id: &str) {
+    /// channel がつながった。hub に載せ(戻り値はその接続の番号)、Tracker に知らせて
+    /// ラベルの母集団に入れ、入力欄が相手を待っていればその場で話し相手にする。
+    pub fn on_channel_connect(
+        &self,
+        session_id: &str,
+        cwd: Option<&str>,
+        tx: tokio::sync::mpsc::UnboundedSender<ChannelCommand>,
+    ) -> u64 {
+        let now = Instant::now();
+        let conn = self.hub.register(session_id, tx, now);
+        self.tracker
+            .lock()
+            .unwrap()
+            .note_channel_hello(session_id, cwd, now);
+        let on_screen = self.on_screen_session().as_deref() == Some(session_id);
+        let mut composer = self.composer.lock().unwrap();
+        if let Some(c) = composer.as_mut() {
+            if c.partner.is_none() {
+                c.partner = Some(session_id.to_string());
+                c.on_screen = on_screen;
+            }
+        }
+        conn
+    }
+
+    /// channel が切れた。同じセッションの新しい接続が生きていれば何もせず false を返す。
+    /// 外れたときは、その接続でしか答えられない権限要求のボタンを消す。
+    /// 話し相手は据え置く(切れたことは `TalkPartner` の文言で伝わる)。
+    pub fn on_channel_disconnect(&self, session_id: &str, conn: u64) -> bool {
+        if !self.hub.unregister(session_id, conn) {
+            return false;
+        }
         self.tracker
             .lock()
             .unwrap()
             .clear_relayed_permission(session_id);
+        true
     }
 
-    /// 秘書からの指示を送る。送り先は表示中のセッション、無ければ最新の接続。ラベルを返す。
-    pub fn send_prompt(&self, text: &str) -> Result<String, String> {
+    /// 入力欄を開いた。この時点で話し相手を決め、閉じるまで変えない。
+    /// 決まった姿は `refresh` が `changed_talk_partner` 経由で webview へ流す。
+    pub fn open_composer(&self) {
+        let (partner, on_screen) = self.pick_partner_now();
+        let on_screen = partner.is_some() && partner == on_screen;
+        *self.composer.lock().unwrap() = Some(Composer { partner, on_screen });
+    }
+
+    pub fn close_composer(&self) {
+        *self.composer.lock().unwrap() = None;
+        *self.last_published_partner.lock().unwrap() = None;
+    }
+
+    /// 今の話し相手。入力欄が閉じていれば `None`。
+    pub fn talk_partner(&self) -> Option<TalkPartner> {
+        // ラベル取得が tracker のロックを取るので、composer のロックは先に離す
+        let composer = self.composer.lock().unwrap().clone()?;
+        let Some(id) = composer.partner else {
+            return Some(TalkPartner {
+                session_id: None,
+                line: NO_PARTNER_LINE.to_string(),
+                can_send: false,
+            });
+        };
+        let label = self.session_label(&id);
+        let connected = self.hub.is_connected(&id);
+        let line = if !connected {
+            format!("{label} はつながっていません")
+        } else if composer.on_screen {
+            format!("{label} へ")
+        } else {
+            format!("{label} へ（画面には出ていません）")
+        };
+        Some(TalkPartner {
+            session_id: Some(id),
+            line,
+            can_send: connected,
+        })
+    }
+
+    /// 話し相手が前回配信から変わっていれば返す(そして記録する)。
+    pub fn changed_talk_partner(&self) -> Option<TalkPartner> {
+        let current = self.talk_partner()?;
+        let mut last = self.last_published_partner.lock().unwrap();
+        if last.as_ref() == Some(&current) {
+            return None;
+        }
+        *last = Some(current.clone());
+        Some(current)
+    }
+
+    /// 吹き出しの主(webview に最後に配信したスナップショットのセッション)。
+    fn on_screen_session(&self) -> Option<String> {
+        self.last_published
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|s| s.session_id.clone())
+    }
+
+    /// 今この瞬間の話し相手を選ぶ。吹き出しの主が秘書につながっていればそれ、
+    /// いなければ最後につながったセッション。戻り値は (話し相手, 吹き出しの主)。
+    fn pick_partner_now(&self) -> (Option<String>, Option<String>) {
+        let on_screen = self.on_screen_session();
+        let partner = self.hub.pick_partner(on_screen.as_deref());
+        (partner, on_screen)
+    }
+
+    /// 秘書からの指示を送る。届いた先のラベルを返す。
+    ///
+    /// `session_id` は入力欄が表示していた話し相手。無い経路(`POST /say`)は
+    /// その場で選ぶ。
+    pub fn send_prompt(&self, text: &str, session_id: Option<&str>) -> Result<String, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("空の指示は送れません".to_string());
         }
-        let preferred = self
-            .last_published
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|s| s.session_id.clone());
-        let target = self
-            .hub
-            .pick_target(preferred.as_deref())
-            .ok_or_else(|| NO_CHANNEL_HINT.to_string())?;
+        let partner = match session_id {
+            Some(id) => {
+                if !self.hub.is_connected(id) {
+                    return Err(format!("{} はつながっていません", self.session_label(id)));
+                }
+                id.to_string()
+            }
+            None => self
+                .pick_partner_now()
+                .0
+                .ok_or_else(|| NO_CHANNEL_HINT.to_string())?,
+        };
         self.hub.send(
-            &target,
+            &partner,
             ChannelCommand::SendPrompt {
                 text: text.to_string(),
             },
         )?;
         eprintln!(
             "[channel] send_prompt session={} text={:?}",
-            short(&target),
+            short(&partner),
             truncate(text, 50)
         );
-        Ok(self.session_label(&target))
+        Ok(self.session_label(&partner))
     }
 
     /// 中継された権限要求に答える。session_id が無ければ request_id から探す。
@@ -321,20 +456,12 @@ impl Core {
         Ok(())
     }
 
+    /// 人が読めるラベル。規則は `Tracker::label_of`(同名のセッションがあれば id の先頭を添える)。
     fn session_label(&self, session_id: &str) -> String {
-        if let Some(s) = self.tracker.lock().unwrap().session(session_id) {
-            return s.label();
-        }
-        self.hub
-            .cwd_of(session_id)
-            .as_deref()
-            .and_then(|c| {
-                c.trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .map(str::to_string)
-            })
-            .filter(|s| !s.is_empty())
+        self.tracker
+            .lock()
+            .unwrap()
+            .label_of(session_id)
             .unwrap_or_else(|| short(session_id))
     }
 }
@@ -361,6 +488,14 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>, core: &Core) {
     // ここを publish の中に置くと、別セッションが吹き出しを占めている間に控えができたとき、
     // トレイの項目が無効のまま残って全文ビューに到達できなくなる(ADR-0001)。
     crate::update_tray_fulltext_item(app, core.has_full_speech());
+    // 話し相手は入力欄が開いている間だけ意味を持ち、接続の増減で変わる
+    if let Some(partner) = core.changed_talk_partner() {
+        eprintln!(
+            "[composer] partner={:?} can_send={}",
+            partner.line, partner.can_send
+        );
+        bridge::publish_talk_partner(app, &partner);
+    }
     if let Some((prev, snapshot)) = core.changed_snapshot_with_prev() {
         eprintln!(
             "[snapshot] {:?} session={} message={:?}",
@@ -457,7 +592,7 @@ async fn say(
         return (StatusCode::UNAUTHORIZED, String::new());
     }
     let text = String::from_utf8_lossy(&body);
-    let result = state.core.send_prompt(&text);
+    let result = state.core.send_prompt(&text, None);
     refresh(&state.app, &state.core);
     match result {
         Ok(label) => (StatusCode::OK, label),
@@ -577,6 +712,27 @@ mod tests {
         )
     }
 
+    fn prompt_body(session: &str, cwd: &str) -> String {
+        serde_json::json!({
+            "session_id": session,
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": cwd,
+            "prompt": "hi",
+        })
+        .to_string()
+    }
+
+    /// 秘書 channel がつながった(`channel::handle` と同じ入口)。届いたコマンドは返り値で読める。
+    fn connect(
+        core: &Core,
+        session: &str,
+        cwd: &str,
+    ) -> (u64, tokio::sync::mpsc::UnboundedReceiver<ChannelCommand>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let conn = core.on_channel_connect(session, Some(cwd), tx);
+        (conn, rx)
+    }
+
     fn stop_body(session: &str, message: &str) -> String {
         serde_json::json!({
             "session_id": session,
@@ -613,7 +769,8 @@ mod tests {
     fn full_speech_survives_session_end() {
         // ADR-0002: SessionState は SessionEnd で捨てられるので、全文は Core に持つ
         let core = core();
-        core.ingest(&stop_body("s1", "読み返したい長い応答")).unwrap();
+        core.ingest(&stop_body("s1", "読み返したい長い応答"))
+            .unwrap();
         core.ingest(
             &serde_json::json!({"session_id":"s1","hook_event_name":"SessionEnd"}).to_string(),
         )
@@ -741,10 +898,13 @@ mod tests {
     fn send_prompt_without_channel_explains_how_to_start_one() {
         let core = core();
         assert_eq!(
-            core.send_prompt("  "),
+            core.send_prompt("  ", None),
             Err("空の指示は送れません".to_string())
         );
-        assert_eq!(core.send_prompt("直して"), Err(NO_CHANNEL_HINT.to_string()));
+        assert_eq!(
+            core.send_prompt("直して", None),
+            Err(NO_CHANNEL_HINT.to_string())
+        );
         assert!(core.respond_permission(None, "abcde", true).is_err());
     }
 
@@ -757,6 +917,7 @@ mod tests {
             description: "Run tests".into(),
             input_preview: "{}".into(),
         };
+        let (conn, _rx) = connect(&core, "s1", "/x");
         core.on_channel_event(
             "s1",
             Some("/x"),
@@ -769,7 +930,7 @@ mod tests {
             snap.message_kind,
             Some(secretary_core::SpeechKind::Permission)
         );
-        core.on_channel_disconnect("s1");
+        assert!(core.on_channel_disconnect("s1", conn));
         let snap = core.changed_snapshot().unwrap();
         assert_eq!(snap.relayed_permission, None);
     }
@@ -783,5 +944,160 @@ mod tests {
         let line = summarize(&env);
         assert!(line.contains("discord prompt=\"やって\""), "{line}");
         assert!(line.contains("session=abcdefgh cwd=b"));
+    }
+
+    #[test]
+    fn composer_talks_to_the_session_on_screen() {
+        let core = core();
+        core.ingest(&prompt_body("s1", "/w/app")).unwrap();
+        let _c = connect(&core, "s1", "/w/app");
+        core.changed_snapshot().unwrap();
+        core.open_composer();
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id.as_deref(), Some("s1"));
+        assert_eq!(partner.line, "app へ");
+        assert!(partner.can_send);
+    }
+
+    #[test]
+    fn composer_falls_back_to_the_newest_connection_when_the_screen_session_is_not_connected() {
+        let core = core();
+        // 画面に出ているのは s1 だが、秘書につながっているのは s2 だけ
+        core.ingest(&prompt_body("s1", "/w/app")).unwrap();
+        core.changed_snapshot().unwrap();
+        let _c = connect(&core, "s2", "/w/lib");
+        core.open_composer();
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id.as_deref(), Some("s2"));
+        assert_eq!(partner.line, "lib へ（画面には出ていません）");
+        assert!(partner.can_send);
+    }
+
+    #[test]
+    fn composer_without_anyone_connected_takes_the_first_session_to_connect_and_keeps_it() {
+        let core = core();
+        core.open_composer();
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id, None);
+        assert_eq!(partner.line, "つながっているセッションがありません");
+        assert!(!partner.can_send);
+        assert_eq!(
+            core.send_prompt("直して", None),
+            Err(NO_CHANNEL_HINT.to_string())
+        );
+
+        let (_, mut rx1) = connect(&core, "s1", "/w/app");
+        let _c2 = connect(&core, "s2", "/w/lib");
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id.as_deref(), Some("s1"));
+        assert_eq!(partner.line, "app へ（画面には出ていません）");
+        assert!(partner.can_send);
+
+        assert_eq!(
+            core.send_prompt("直して", partner.session_id.as_deref()),
+            Ok("app".to_string())
+        );
+        assert_eq!(
+            rx1.try_recv().unwrap(),
+            ChannelCommand::SendPrompt {
+                text: "直して".into()
+            }
+        );
+    }
+
+    #[test]
+    fn talk_partner_stays_put_while_the_bubble_owner_changes() {
+        let core = core();
+        core.ingest(&prompt_body("s1", "/w/app")).unwrap();
+        let (_, mut rx1) = connect(&core, "s1", "/w/app");
+        let (_, mut rx2) = connect(&core, "s2", "/w/lib");
+        core.changed_snapshot().unwrap();
+        core.open_composer();
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id.as_deref(), Some("s1"));
+
+        // 打っている間に s2 が吹き出しを奪う
+        core.ingest(&prompt_body("s2", "/w/lib")).unwrap();
+        let snap = core.changed_snapshot().unwrap();
+        assert_eq!(snap.session_id.as_deref(), Some("s2"));
+        assert_eq!(core.talk_partner().unwrap(), partner);
+
+        assert_eq!(
+            core.send_prompt("直して", partner.session_id.as_deref()),
+            Ok("app".to_string())
+        );
+        assert!(rx1.try_recv().is_ok());
+        assert!(rx2.try_recv().is_err());
+
+        // 閉じて開き直せば、今の吹き出しの主が話し相手になる
+        core.close_composer();
+        assert_eq!(core.talk_partner(), None);
+        core.open_composer();
+        assert_eq!(
+            core.talk_partner().unwrap().session_id.as_deref(),
+            Some("s2")
+        );
+    }
+
+    #[test]
+    fn disconnected_partner_is_kept_but_cannot_be_sent_to() {
+        let core = core();
+        core.ingest(&prompt_body("s1", "/w/app")).unwrap();
+        let (c1, _rx1) = connect(&core, "s1", "/w/app");
+        let _c2 = connect(&core, "s2", "/w/lib");
+        core.changed_snapshot().unwrap();
+        core.open_composer();
+        assert_eq!(
+            core.talk_partner().unwrap().session_id.as_deref(),
+            Some("s1")
+        );
+
+        assert!(core.on_channel_disconnect("s1", c1));
+        let partner = core.talk_partner().unwrap();
+        assert_eq!(partner.session_id.as_deref(), Some("s1"));
+        assert_eq!(partner.line, "app はつながっていません");
+        assert!(!partner.can_send);
+        assert_eq!(
+            core.send_prompt("直して", Some("s1")),
+            Err("app はつながっていません".to_string())
+        );
+
+        // 入力欄を介さない経路(POST /say)は、その場で残っている接続を選ぶ
+        core.close_composer();
+        assert_eq!(core.send_prompt("直して", None), Ok("lib".to_string()));
+    }
+
+    #[test]
+    fn a_stale_disconnect_of_a_reconnected_session_is_ignored() {
+        let core = core();
+        let (old, _rx_old) = connect(&core, "s1", "/w/app");
+        let (_new, _rx_new) = connect(&core, "s1", "/w/app");
+        // 古い接続の後始末は、新しい接続を外してはいけない
+        assert!(!core.on_channel_disconnect("s1", old));
+        assert!(core.hub().is_connected("s1"));
+    }
+
+    #[test]
+    fn changed_talk_partner_reports_only_changes_while_the_composer_is_open() {
+        let core = core();
+        assert_eq!(core.changed_talk_partner(), None);
+        core.open_composer();
+        // 開いた直後の姿も、接続の増減による変化も、同じ経路で 1 回ずつ流れる
+        let opened = core.changed_talk_partner().unwrap();
+        assert_eq!(opened.session_id, None);
+        assert_eq!(core.changed_talk_partner(), None);
+
+        let (c1, _rx) = connect(&core, "s1", "/w/app");
+        assert_eq!(
+            core.changed_talk_partner().unwrap().session_id.as_deref(),
+            Some("s1")
+        );
+        assert_eq!(core.changed_talk_partner(), None);
+
+        assert!(core.on_channel_disconnect("s1", c1));
+        assert!(!core.changed_talk_partner().unwrap().can_send);
+
+        core.close_composer();
+        assert_eq!(core.changed_talk_partner(), None);
     }
 }

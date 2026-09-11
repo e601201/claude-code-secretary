@@ -717,6 +717,8 @@ pub fn run() {
             show_context_menu,
             set_interactive,
             fulltext::full_speech,
+            channel::composer_opened,
+            channel::composer_closed,
             channel::send_prompt,
             channel::respond_permission,
             settings::settings_info,
