@@ -5,6 +5,8 @@
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
+    /* TypeScript 6+ は @types/* を自動で読まないので bun:test の型を明示する */
+    "types": ["bun"],
 
     /* Bundler mode */
     "moduleResolution": "bundler",

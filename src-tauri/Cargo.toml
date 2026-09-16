@@ -29,5 +29,5 @@ toml = "1.1.5"
 uuid = { version = "1.26.0", features = ["v4"] }
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-notification = "2.4.0"
-ts-rs = "10"
+ts-rs = "12"
 
